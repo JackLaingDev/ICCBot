@@ -86,3 +86,30 @@ trading-bot/
     utils/        # logging and helpers
   tests/          # unit tests
   scripts/        # manual scripts
+```
+
+---
+
+## Local Setup (Windows PowerShell)
+
+```powershell
+# from repo root
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -e .
+```
+
+If activation is blocked:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+Run a basic import check:
+
+```powershell
+python -c "import src, src.app.main, src.config.settings; print('import-ok')"
+python -m unittest tests/test_smoke_imports.py -v
+```
