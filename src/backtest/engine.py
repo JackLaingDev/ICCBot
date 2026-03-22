@@ -1,4 +1,164 @@
-"""Backtest engine placeholder.
+"""Simple sequential backtest engine.
 
-Responsible for transparent trade simulation; must not send broker orders.
+This module simulates strategy trades candle-by-candle with one active trade at a time.
+It contains no MT5 or live execution behavior.
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+import pandas as pd
+
+from src.strategies.icc_strategy import evaluate_icc_v1
+from src.strategies.models import StrategyDecision
+
+
+@dataclass(frozen=True)
+class BacktestTrade:
+    """A single simulated trade result."""
+
+    direction: Literal["BUY", "SELL"]
+    entry_index: int
+    entry_time: object
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    exit_index: int
+    exit_time: object
+    exit_price: float
+    exit_reason: str
+    profit: float
+    rr: float | None
+
+
+def run_backtest(
+    dataframe: pd.DataFrame,
+    *,
+    ema_period: int = 200,
+    pullback_lookback: int = 5,
+    take_profit_rr: float = 1.5,
+) -> list[BacktestTrade]:
+    """Run a deterministic one-trade-at-a-time backtest over OHLCV candles."""
+
+    _validate_backtest_input(dataframe)
+    ordered = dataframe.sort_values("time").reset_index(drop=True)
+    trades: list[BacktestTrade] = []
+
+    index = 0
+    while index < len(ordered):
+        window = ordered.iloc[: index + 1]
+        try:
+            decision = evaluate_icc_v1(
+                window,
+                ema_period=ema_period,
+                pullback_lookback=pullback_lookback,
+                take_profit_rr=take_profit_rr,
+            )
+        except ValueError as exc:
+            # Warm-up period: strategy may need more rows before evaluation is possible.
+            if "requires at least" in str(exc):
+                index += 1
+                continue
+            raise
+
+        if decision.signal == "NONE":
+            index += 1
+            continue
+        if decision.stop_loss is None or decision.take_profit is None:
+            index += 1
+            continue
+
+        trade = _simulate_trade(
+            dataframe=ordered,
+            entry_index=index,
+            decision=decision,
+        )
+        trades.append(trade)
+        index = trade.exit_index + 1
+
+    return trades
+
+
+def _simulate_trade(
+    *,
+    dataframe: pd.DataFrame,
+    entry_index: int,
+    decision: StrategyDecision,
+) -> BacktestTrade:
+    entry_candle = dataframe.iloc[entry_index]
+    direction = decision.signal
+    if direction not in {"BUY", "SELL"}:
+        raise ValueError("decision.signal must be BUY or SELL for trade simulation")
+    entry_price = float(entry_candle["close"])
+    stop_loss = float(decision.stop_loss)
+    take_profit = float(decision.take_profit)
+
+    exit_index = len(dataframe) - 1
+    exit_price = float(dataframe.iloc[-1]["close"])
+    exit_reason = "end_of_data"
+
+    for idx in range(entry_index + 1, len(dataframe)):
+        candle = dataframe.iloc[idx]
+        high = float(candle["high"])
+        low = float(candle["low"])
+
+        if direction == "BUY":
+            # Conservative same-candle handling: assume SL first if both hit.
+            if low <= stop_loss:
+                exit_index = idx
+                exit_price = stop_loss
+                exit_reason = "stop_loss"
+                break
+            if high >= take_profit:
+                exit_index = idx
+                exit_price = take_profit
+                exit_reason = "take_profit"
+                break
+        else:  # SELL
+            if high >= stop_loss:
+                exit_index = idx
+                exit_price = stop_loss
+                exit_reason = "stop_loss"
+                break
+            if low <= take_profit:
+                exit_index = idx
+                exit_price = take_profit
+                exit_reason = "take_profit"
+                break
+
+    if direction == "BUY":
+        profit = exit_price - entry_price
+        risk = entry_price - stop_loss
+    else:
+        profit = entry_price - exit_price
+        risk = stop_loss - entry_price
+
+    rr = (profit / risk) if risk > 0 else None
+    exit_candle = dataframe.iloc[exit_index]
+
+    return BacktestTrade(
+        direction=direction,
+        entry_index=entry_index,
+        entry_time=entry_candle["time"],
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        exit_index=exit_index,
+        exit_time=exit_candle["time"],
+        exit_price=exit_price,
+        exit_reason=exit_reason,
+        profit=profit,
+        rr=rr,
+    )
+
+
+def _validate_backtest_input(dataframe: pd.DataFrame) -> None:
+    if dataframe.empty:
+        raise ValueError("dataframe must not be empty")
+
+    required = {"time", "open", "high", "low", "close", "volume"}
+    missing = required.difference(dataframe.columns)
+    if missing:
+        raise ValueError(f"dataframe is missing required columns: {sorted(missing)}")
