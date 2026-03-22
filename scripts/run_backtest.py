@@ -7,7 +7,7 @@ from time import perf_counter
 
 import pandas as pd
 
-from src.backtest.engine import run_backtest
+from src.backtest.engine import BacktestTrade, run_backtest
 from src.backtest.metrics import calculate_metrics
 from src.config.settings import load_settings
 from src.data.market_data import fetch_market_data
@@ -137,16 +137,14 @@ def main() -> int:
                 else "none"
             )
         )
+        print("Profit by entry hour: " + _format_hour_profit(trades))
+        print("Win rate by entry hour: " + _format_hour_win_rate(trades))
         print(f"Average trade duration (bars): {metrics.average_trade_duration_bars:.2f}")
-        print("First 5 trades:")
+        print("Top 5 winning trades:")
+        _print_trade_list(_top_winning_trades(trades, limit=5))
 
-        for index, trade in enumerate(trades[:5], start=1):
-            rr_text = f"{trade.rr:.5f}" if trade.rr is not None else "n/a"
-            print(
-                f"{index}. {trade.direction} "
-                f"entry={trade.entry_time} exit={trade.exit_time} "
-                f"reason={trade.exit_reason} profit={trade.profit:.5f} rr={rr_text}"
-            )
+        print("Top 5 losing trades:")
+        _print_trade_list(_top_losing_trades(trades, limit=5))
 
         if not trades:
             print("No trades generated.")
@@ -258,6 +256,68 @@ def _normalize_utc_datetime_key(values: pd.Series) -> pd.Series:
     """Normalize merge keys to datetime64[ns, UTC] for merge_asof."""
     normalized = pd.to_datetime(values, utc=True)
     return normalized.astype("datetime64[ns, UTC]")
+
+
+def _entry_hour(entry_time: object) -> str:
+    timestamp = _to_utc_timestamp(entry_time)
+    hour = int(timestamp.hour)
+    if 0 <= hour <= 23:
+        return f"{hour:02d}"
+    return "unknown"
+
+
+def _format_hour_profit(trades: list[BacktestTrade]) -> str:
+    if not trades:
+        return "none"
+
+    by_hour: dict[str, float] = {}
+    for trade in trades:
+        hour = _entry_hour(trade.entry_time)
+        by_hour[hour] = by_hour.get(hour, 0.0) + float(trade.profit)
+    return ", ".join(f"{hour}: {value:.5f}" for hour, value in sorted(by_hour.items()))
+
+
+def _format_hour_win_rate(trades: list[BacktestTrade]) -> str:
+    if not trades:
+        return "none"
+
+    total_by_hour: dict[str, int] = {}
+    wins_by_hour: dict[str, int] = {}
+    for trade in trades:
+        hour = _entry_hour(trade.entry_time)
+        total_by_hour[hour] = total_by_hour.get(hour, 0) + 1
+        if trade.profit > 0:
+            wins_by_hour[hour] = wins_by_hour.get(hour, 0) + 1
+
+    parts: list[str] = []
+    for hour, total in sorted(total_by_hour.items()):
+        wins = wins_by_hour.get(hour, 0)
+        rate = (wins / total) * 100.0
+        parts.append(f"{hour}: {rate:.2f}% ({wins}/{total})")
+    return ", ".join(parts)
+
+
+def _top_winning_trades(trades: list[BacktestTrade], *, limit: int) -> list[BacktestTrade]:
+    return sorted((trade for trade in trades if trade.profit > 0), key=lambda t: t.profit, reverse=True)[
+        :limit
+    ]
+
+
+def _top_losing_trades(trades: list[BacktestTrade], *, limit: int) -> list[BacktestTrade]:
+    return sorted((trade for trade in trades if trade.profit < 0), key=lambda t: t.profit)[:limit]
+
+
+def _print_trade_list(trades: list[BacktestTrade]) -> None:
+    if not trades:
+        print("none")
+        return
+    for index, trade in enumerate(trades, start=1):
+        rr_text = f"{trade.rr:.5f}" if trade.rr is not None else "n/a"
+        print(
+            f"{index}. {trade.direction} "
+            f"entry={trade.entry_time} exit={trade.exit_time} "
+            f"reason={trade.exit_reason} profit={trade.profit:.5f} rr={rr_text}"
+        )
 
 
 if __name__ == "__main__":
