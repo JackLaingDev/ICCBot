@@ -95,6 +95,28 @@ class BacktestEngineTests(unittest.TestCase):
 
         self.assertEqual(trades, [])
 
+    def test_short_only_mode_ignores_buy_signals(self) -> None:
+        data = _bars()
+
+        def decision_for_window(window: pd.DataFrame, **_: object) -> StrategyDecision:
+            if len(window) == 3:
+                return StrategyDecision(signal="BUY", stop_loss=1.00, take_profit=1.05)
+            if len(window) == 4:
+                return StrategyDecision(signal="SELL", stop_loss=1.07, take_profit=1.03)
+            return StrategyDecision(signal="NONE", reason="none")
+
+        with patch("src.backtest.engine.evaluate_icc_v1", side_effect=decision_for_window):
+            trades = run_backtest(
+                data,
+                ema_period=20,
+                pullback_lookback=5,
+                take_profit_rr=1.5,
+                allowed_directions={"SELL"},
+            )
+
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0].direction, "SELL")
+
 
 if __name__ == "__main__":
     unittest.main()

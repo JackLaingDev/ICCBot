@@ -39,10 +39,12 @@ def run_backtest(
     ema_period: int = 200,
     pullback_lookback: int = 5,
     take_profit_rr: float = 1.5,
+    allowed_directions: set[str] | None = None,
 ) -> list[BacktestTrade]:
     """Run a deterministic one-trade-at-a-time backtest over OHLCV candles."""
 
     _validate_backtest_input(dataframe)
+    _validate_allowed_directions(allowed_directions)
     ordered = dataframe.sort_values("time").reset_index(drop=True)
     trades: list[BacktestTrade] = []
 
@@ -64,6 +66,9 @@ def run_backtest(
             raise
 
         if decision.signal == "NONE":
+            index += 1
+            continue
+        if allowed_directions is not None and decision.signal not in allowed_directions:
             index += 1
             continue
         if decision.stop_loss is None or decision.take_profit is None:
@@ -162,3 +167,11 @@ def _validate_backtest_input(dataframe: pd.DataFrame) -> None:
     missing = required.difference(dataframe.columns)
     if missing:
         raise ValueError(f"dataframe is missing required columns: {sorted(missing)}")
+
+
+def _validate_allowed_directions(allowed_directions: set[str] | None) -> None:
+    if allowed_directions is None:
+        return
+    invalid = set(allowed_directions).difference({"BUY", "SELL"})
+    if invalid:
+        raise ValueError(f"allowed_directions contains invalid values: {sorted(invalid)}")
