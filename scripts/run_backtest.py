@@ -42,6 +42,28 @@ def main() -> int:
         print(f"Total profit: {metrics.total_profit:.5f}")
         print(f"Max drawdown: {metrics.max_drawdown:.5f}")
         print(f"Average RR: {metrics.average_rr:.5f}")
+        print(
+            f"BUY vs SELL: buy_trades={metrics.buy_trades} sell_trades={metrics.sell_trades} "
+            f"buy_profit={metrics.buy_profit:.5f} sell_profit={metrics.sell_profit:.5f}"
+        )
+        print(
+            "Exit reasons: "
+            f"take_profit={metrics.exit_reason_counts.get('take_profit', 0)} "
+            f"stop_loss={metrics.exit_reason_counts.get('stop_loss', 0)} "
+            f"end_of_data={metrics.exit_reason_counts.get('end_of_data', 0)}"
+        )
+        print(
+            "Entry hour counts: "
+            + (
+                ", ".join(
+                    f"{hour}: {count}"
+                    for hour, count in sorted(metrics.entry_hour_counts.items(), key=lambda x: x[0])
+                )
+                if metrics.entry_hour_counts
+                else "none"
+            )
+        )
+        print(f"Average trade duration (bars): {metrics.average_trade_duration_bars:.2f}")
         print("First 5 trades:")
 
         for index, trade in enumerate(trades[:5], start=1):
