@@ -21,6 +21,22 @@ def _bars() -> pd.DataFrame:
     )
 
 
+def _bars_with_hours(hours: list[int]) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for index, hour in enumerate(hours, start=1):
+        rows.append(
+            {
+                "time": pd.Timestamp(2024, 1, 1, hour, 0, tz="UTC"),
+                "open": 1.00 + (index * 0.01),
+                "high": 1.02 + (index * 0.01),
+                "low": 0.99 + (index * 0.01),
+                "close": 1.01 + (index * 0.01),
+                "volume": 100 + index,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 class BacktestEngineTests(unittest.TestCase):
     """Validate deterministic trade simulation behavior."""
 
@@ -116,6 +132,62 @@ class BacktestEngineTests(unittest.TestCase):
 
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0].direction, "SELL")
+
+    def test_session_filter_allows_entries_inside_window(self) -> None:
+        data = _bars_with_hours([6, 7, 8, 9, 10])
+
+        def always_sell(_: pd.DataFrame, **__: object) -> StrategyDecision:
+            return StrategyDecision(signal="SELL", stop_loss=1.20, take_profit=0.80)
+
+        with patch("src.backtest.engine.evaluate_icc_v1", side_effect=always_sell):
+            trades = run_backtest(
+                data,
+                session_start_hour=7,
+                session_end_hour=12,
+            )
+
+        self.assertGreaterEqual(len(trades), 1)
+        self.assertEqual(trades[0].direction, "SELL")
+
+    def test_session_filter_blocks_entries_outside_window(self) -> None:
+        data = _bars_with_hours([0, 1, 2, 3, 4])
+
+        def always_sell(_: pd.DataFrame, **__: object) -> StrategyDecision:
+            return StrategyDecision(signal="SELL", stop_loss=1.20, take_profit=0.80)
+
+        with patch("src.backtest.engine.evaluate_icc_v1", side_effect=always_sell):
+            trades = run_backtest(
+                data,
+                session_start_hour=7,
+                session_end_hour=12,
+            )
+
+        self.assertEqual(trades, [])
+
+    def test_session_filter_supports_overnight_window(self) -> None:
+        data = _bars_with_hours([22, 23, 0, 1, 2])
+
+        def always_sell(_: pd.DataFrame, **__: object) -> StrategyDecision:
+            return StrategyDecision(signal="SELL", stop_loss=1.20, take_profit=0.80)
+
+        with patch("src.backtest.engine.evaluate_icc_v1", side_effect=always_sell):
+            trades = run_backtest(
+                data,
+                session_start_hour=22,
+                session_end_hour=2,
+            )
+
+        self.assertGreaterEqual(len(trades), 1)
+
+    def test_session_filter_rejects_equal_start_and_end(self) -> None:
+        data = _bars_with_hours([7, 8, 9, 10, 11])
+
+        with self.assertRaises(ValueError):
+            run_backtest(
+                data,
+                session_start_hour=7,
+                session_end_hour=7,
+            )
 
 
 if __name__ == "__main__":

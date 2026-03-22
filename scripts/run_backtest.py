@@ -27,11 +27,17 @@ def main() -> int:
     symbol = settings.trading.symbol
     timeframe = settings.trading.timeframe
     allowed_directions = None if mode == "normal" else {"SELL"}
+    session_start_hour = args.session_start_hour
+    session_end_hour = args.session_end_hour
     progress_state = {"last_percent": -1}
     _log(
         f"Prepared run config: symbol={symbol}, timeframe={timeframe}, "
         f"lookback_bars={settings.data.lookback_bars}"
     )
+    if session_start_hour is None:
+        _log("Session filter: none (all UTC hours)")
+    else:
+        _log(f"Session filter UTC: {session_start_hour:02d}-{session_end_hour:02d}")
 
     try:
         _log("Initializing MT5 client...")
@@ -54,6 +60,8 @@ def main() -> int:
             pullback_lookback=5,
             take_profit_rr=settings.strategy.take_profit_rr,
             allowed_directions=allowed_directions,
+            session_start_hour=session_start_hour,
+            session_end_hour=session_end_hour,
             progress_callback=lambda done, total: _print_progress(
                 done=done,
                 total=total,
@@ -68,6 +76,14 @@ def main() -> int:
         _log("Metrics calculation complete")
 
         print(f"Mode: {mode}")
+        print(
+            "Session filter (UTC): "
+            + (
+                "none"
+                if session_start_hour is None
+                else f"{session_start_hour:02d}-{session_end_hour:02d}"
+            )
+        )
         print(f"Symbol: {symbol}")
         print(f"Timeframe: {timeframe}")
         print(f"Rows fetched: {len(dataframe)}")
@@ -149,6 +165,18 @@ def _parse_args() -> argparse.Namespace:
         choices=("normal", "short-only"),
         default="normal",
         help="Backtest mode: normal (BUY+SELL) or short-only (SELL only).",
+    )
+    parser.add_argument(
+        "--session-start-hour",
+        type=int,
+        default=None,
+        help="Optional UTC hour (0-23) to start entry session window.",
+    )
+    parser.add_argument(
+        "--session-end-hour",
+        type=int,
+        default=None,
+        help="Optional UTC hour (0-23) to end entry session window (exclusive).",
     )
     return parser.parse_args()
 
