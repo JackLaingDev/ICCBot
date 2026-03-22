@@ -141,6 +141,8 @@ def main() -> int:
         )
         print("Profit by entry hour: " + _format_hour_profit(trades))
         print("Win rate by entry hour: " + _format_hour_win_rate(trades))
+        print("Monthly breakdown (UTC entry month):")
+        _print_monthly_breakdown(trades)
         print(f"Average trade duration (bars): {metrics.average_trade_duration_bars:.2f}")
         print("Top 5 winning trades:")
         _print_trade_list(_top_winning_trades(trades, limit=5))
@@ -281,6 +283,10 @@ def _build_h1_ema_bias_by_time(
 
 
 def _to_utc_timestamp(value: object) -> pd.Timestamp:
+    """Normalize value to UTC timestamp.
+
+    Naive datetimes are treated as UTC by convention.
+    """
     timestamp = pd.Timestamp(value)
     if timestamp.tzinfo is None:
         return timestamp.tz_localize("UTC")
