@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from time import perf_counter
 
+import pandas as pd
+
 from src.backtest.engine import run_backtest
 from src.backtest.metrics import calculate_metrics
 from src.config.settings import load_settings
@@ -29,6 +31,8 @@ def main() -> int:
     allowed_directions = None if mode == "normal" else {"SELL"}
     session_start_hour = args.session_start_hour
     session_end_hour = args.session_end_hour
+    htf_bias_mode = args.htf_bias
+    htf_bias_by_time: dict[pd.Timestamp, str] | None = None
     progress_state = {"last_percent": -1}
     _log(
         f"Prepared run config: symbol={symbol}, timeframe={timeframe}, "
@@ -38,6 +42,7 @@ def main() -> int:
         _log("Session filter: none (all UTC hours)")
     else:
         _log(f"Session filter UTC: {session_start_hour:02d}-{session_end_hour:02d}")
+    _log(f"HTF bias filter: {htf_bias_mode}")
 
     try:
         _log("Initializing MT5 client...")
@@ -53,6 +58,23 @@ def main() -> int:
         )
         _log(f"Data fetch complete (rows={len(dataframe)})")
 
+        if htf_bias_mode == "h1-ema200":
+            _log("Fetching H1 data for HTF bias...")
+            htf_dataframe = fetch_market_data(
+                client=client,
+                symbol=symbol,
+                timeframe="H1",
+                count=settings.data.lookback_bars,
+            )
+            if htf_dataframe.empty:
+                raise ValueError("HTF bias requested but no H1 data was fetched.")
+            htf_bias_by_time = _build_h1_ema_bias_by_time(
+                lower_timeframe_df=dataframe,
+                htf_df=htf_dataframe,
+                ema_period=200,
+            )
+            _log(f"HTF bias aligned to M15 bars (mapped={len(htf_bias_by_time)})")
+
         _log("Running backtest engine...")
         trades = run_backtest(
             dataframe,
@@ -62,6 +84,7 @@ def main() -> int:
             allowed_directions=allowed_directions,
             session_start_hour=session_start_hour,
             session_end_hour=session_end_hour,
+            htf_bias_by_time=htf_bias_by_time,
             progress_callback=lambda done, total: _print_progress(
                 done=done,
                 total=total,
@@ -84,6 +107,7 @@ def main() -> int:
                 else f"{session_start_hour:02d}-{session_end_hour:02d}"
             )
         )
+        print(f"HTF bias filter: {htf_bias_mode}")
         print(f"Symbol: {symbol}")
         print(f"Timeframe: {timeframe}")
         print(f"Rows fetched: {len(dataframe)}")
@@ -178,7 +202,62 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Optional UTC hour (0-23) to end entry session window (exclusive).",
     )
+    parser.add_argument(
+        "--htf-bias",
+        choices=("none", "h1-ema200"),
+        default="none",
+        help="Optional higher-timeframe bias filter: none or H1 close vs EMA(200).",
+    )
     return parser.parse_args()
+
+
+def _build_h1_ema_bias_by_time(
+    *,
+    lower_timeframe_df: pd.DataFrame,
+    htf_df: pd.DataFrame,
+    ema_period: int,
+) -> dict[pd.Timestamp, str]:
+    """Build M15->HTF bias map using only confirmed H1 closes.
+
+    MT5 bar timestamps represent bar open time. To avoid lookahead, an H1 bar's
+    bias becomes available only after that H1 bar closes (open_time + 1 hour).
+    """
+    htf = htf_df[["time", "close"]].sort_values("time").copy()
+    htf["time"] = _normalize_utc_datetime_key(htf["time"])
+    htf["ema"] = htf["close"].ewm(span=ema_period, adjust=False).mean()
+    htf["bias"] = "NEUTRAL"
+    htf.loc[htf["close"] > htf["ema"], "bias"] = "BULLISH"
+    htf.loc[htf["close"] < htf["ema"], "bias"] = "BEARISH"
+    htf["available_time"] = htf["time"] + pd.Timedelta(hours=1)
+    htf["available_time"] = _normalize_utc_datetime_key(htf["available_time"])
+
+    lower = lower_timeframe_df[["time"]].sort_values("time").copy()
+    lower["time"] = _normalize_utc_datetime_key(lower["time"])
+    aligned = pd.merge_asof(
+        lower,
+        htf[["available_time", "bias"]],
+        left_on="time",
+        right_on="available_time",
+        direction="backward",
+    )
+    aligned["bias"] = aligned["bias"].fillna("NEUTRAL")
+    return {
+        _to_utc_timestamp(ts): str(bias)
+        for ts, bias in zip(aligned["time"], aligned["bias"])
+    }
+
+
+def _to_utc_timestamp(value: object) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def _normalize_utc_datetime_key(values: pd.Series) -> pd.Series:
+    """Normalize merge keys to datetime64[ns, UTC] for merge_asof."""
+    normalized = pd.to_datetime(values, utc=True)
+    return normalized.astype("datetime64[ns, UTC]")
 
 
 if __name__ == "__main__":

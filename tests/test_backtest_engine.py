@@ -189,6 +189,42 @@ class BacktestEngineTests(unittest.TestCase):
                 session_end_hour=7,
             )
 
+    def test_htf_bias_blocks_misaligned_sell_entries(self) -> None:
+        data = _bars_with_hours([7, 8, 9, 10, 11])
+        htf_bias_by_time = {
+            pd.Timestamp(row["time"]).tz_convert("UTC"): "BULLISH"
+            for _, row in data.iterrows()
+        }
+
+        def always_sell(_: pd.DataFrame, **__: object) -> StrategyDecision:
+            return StrategyDecision(signal="SELL", stop_loss=1.20, take_profit=0.80)
+
+        with patch("src.backtest.engine.evaluate_icc_v1", side_effect=always_sell):
+            trades = run_backtest(
+                data,
+                htf_bias_by_time=htf_bias_by_time,
+            )
+
+        self.assertEqual(trades, [])
+
+    def test_htf_bias_allows_aligned_sell_entries(self) -> None:
+        data = _bars_with_hours([7, 8, 9, 10, 11])
+        htf_bias_by_time = {
+            pd.Timestamp(row["time"]).tz_convert("UTC"): "BEARISH"
+            for _, row in data.iterrows()
+        }
+
+        def always_sell(_: pd.DataFrame, **__: object) -> StrategyDecision:
+            return StrategyDecision(signal="SELL", stop_loss=1.20, take_profit=0.80)
+
+        with patch("src.backtest.engine.evaluate_icc_v1", side_effect=always_sell):
+            trades = run_backtest(
+                data,
+                htf_bias_by_time=htf_bias_by_time,
+            )
+
+        self.assertGreaterEqual(len(trades), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
