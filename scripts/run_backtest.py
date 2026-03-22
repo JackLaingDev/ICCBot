@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+
 from src.backtest.engine import run_backtest
 from src.backtest.metrics import calculate_metrics
 from src.config.settings import load_settings
@@ -12,10 +14,13 @@ from src.data.mt5_client import MT5Client
 def main() -> int:
     """Initialize MT5, fetch data, run backtest, print summary, and exit."""
 
+    args = _parse_args()
+    mode = args.mode
     settings = load_settings()
     client = MT5Client()
     symbol = settings.trading.symbol
     timeframe = settings.trading.timeframe
+    allowed_directions = None if mode == "normal" else {"SELL"}
 
     try:
         client.initialize()
@@ -31,9 +36,11 @@ def main() -> int:
             ema_period=settings.strategy.ema_period,
             pullback_lookback=5,
             take_profit_rr=settings.strategy.take_profit_rr,
+            allowed_directions=allowed_directions,
         )
         metrics = calculate_metrics(trades)
 
+        print(f"Mode: {mode}")
         print(f"Symbol: {symbol}")
         print(f"Timeframe: {timeframe}")
         print(f"Rows fetched: {len(dataframe)}")
@@ -81,6 +88,17 @@ def main() -> int:
     finally:
         if client.is_connected():
             client.shutdown()
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run ICC backtest.")
+    parser.add_argument(
+        "--mode",
+        choices=("normal", "short-only"),
+        default="normal",
+        help="Backtest mode: normal (BUY+SELL) or short-only (SELL only).",
+    )
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
