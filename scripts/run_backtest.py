@@ -143,6 +143,8 @@ def main() -> int:
         print("Win rate by entry hour: " + _format_hour_win_rate(trades))
         print("Monthly breakdown (UTC entry month):")
         _print_monthly_breakdown(trades)
+        print("Regime breakdown (M15 range median split):")
+        _print_regime_breakdown(trades, _build_volatility_regime_by_time(dataframe))
         print(f"Average trade duration (bars): {metrics.average_trade_duration_bars:.2f}")
         print("Top 5 winning trades:")
         _print_trade_list(_top_winning_trades(trades, limit=5))
@@ -382,6 +384,88 @@ def _split_date_range_text(split_df: pd.DataFrame) -> str:
     start = _to_utc_timestamp(split_df.iloc[0]["time"]).strftime("%Y-%m-%d")
     end = _to_utc_timestamp(split_df.iloc[-1]["time"]).strftime("%Y-%m-%d")
     return f"{start} to {end} UTC"
+
+
+def _build_volatility_regime_by_time(dataframe: pd.DataFrame) -> dict[pd.Timestamp, str]:
+    """Classify each M15 bar into low/high volatility by median candle range.
+
+    Assumptions:
+    - Range is `high - low` in raw price units.
+    - Threshold is the median range over the current fetched dataset.
+    - Bars with range equal to median are treated as `low_vol`.
+    """
+    working = dataframe[["time", "high", "low"]].copy()
+    working["time"] = _normalize_utc_datetime_key(working["time"])
+    working["high"] = pd.to_numeric(working["high"], errors="coerce")
+    working["low"] = pd.to_numeric(working["low"], errors="coerce")
+    working = working.dropna(subset=["time", "high", "low"]).sort_values("time")
+    if working.empty:
+        return {}
+
+    working["range"] = working["high"] - working["low"]
+    threshold = float(working["range"].median())
+    working["regime"] = "low_vol"
+    working.loc[working["range"] > threshold, "regime"] = "high_vol"
+    regime_series = working.set_index("time")["regime"]
+    return regime_series.to_dict()
+
+
+def _print_regime_breakdown(
+    trades: list[BacktestTrade],
+    regime_by_time: dict[pd.Timestamp, str],
+) -> None:
+    """Print trade metrics grouped by regime at trade entry time.
+
+    Assumptions:
+    - Regime is assigned from the entry bar timestamp only.
+    - If an entry timestamp is missing in `regime_by_time`, bucket as `unknown`.
+    """
+    if not trades:
+        print("none")
+        return
+
+    buckets: dict[str, list[BacktestTrade]] = {}
+    for trade in trades:
+        regime = regime_by_time.get(_to_utc_timestamp(trade.entry_time), "unknown")
+        buckets.setdefault(regime, []).append(trade)
+
+    ordered_regimes = [name for name in ("low_vol", "high_vol", "unknown") if name in buckets]
+    for regime in ordered_regimes:
+        regime_metrics = calculate_metrics(buckets[regime])
+        print(
+            f"{regime}: trades={regime_metrics.total_trades} "
+            f"win_rate={regime_metrics.win_rate:.2f}% "
+            f"total_profit={regime_metrics.total_profit:.5f} "
+            f"max_drawdown={regime_metrics.max_drawdown:.5f}"
+        )
+
+
+def _print_monthly_breakdown(trades: list[BacktestTrade]) -> None:
+    """Print per-month trades/profit/win-rate by UTC entry month."""
+    if not trades:
+        print("none")
+        return
+
+    by_month: dict[str, dict[str, float]] = {}
+    for trade in trades:
+        month_key = _to_utc_timestamp(trade.entry_time).strftime("%Y-%m")
+        if month_key not in by_month:
+            by_month[month_key] = {"trades": 0.0, "wins": 0.0, "profit": 0.0}
+        by_month[month_key]["trades"] += 1
+        if trade.profit > 0:
+            by_month[month_key]["wins"] += 1
+        by_month[month_key]["profit"] += float(trade.profit)
+
+    for month_key in sorted(by_month.keys()):
+        month_data = by_month[month_key]
+        total = int(month_data["trades"])
+        wins = int(month_data["wins"])
+        win_rate = (wins / total) * 100.0 if total > 0 else 0.0
+        print(
+            f"{month_key}: trades={total} "
+            f"profit={month_data['profit']:.5f} "
+            f"win_rate={win_rate:.2f}%"
+        )
 
 
 if __name__ == "__main__":
