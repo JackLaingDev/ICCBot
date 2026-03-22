@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from time import perf_counter
 
 from src.backtest.engine import run_backtest
 from src.backtest.metrics import calculate_metrics
@@ -14,31 +15,57 @@ from src.data.mt5_client import MT5Client
 def main() -> int:
     """Initialize MT5, fetch data, run backtest, print summary, and exit."""
 
+    started_at = perf_counter()
     args = _parse_args()
     mode = args.mode
+    _log(f"Starting backtest run (mode={mode})")
+
     settings = load_settings()
+    _log("Settings loaded")
+
     client = MT5Client()
     symbol = settings.trading.symbol
     timeframe = settings.trading.timeframe
     allowed_directions = None if mode == "normal" else {"SELL"}
+    progress_state = {"last_percent": -1}
+    _log(
+        f"Prepared run config: symbol={symbol}, timeframe={timeframe}, "
+        f"lookback_bars={settings.data.lookback_bars}"
+    )
 
     try:
+        _log("Initializing MT5 client...")
         client.initialize()
+        _log("MT5 initialized")
+
+        _log("Fetching market data...")
         dataframe = fetch_market_data(
             client=client,
             symbol=symbol,
             timeframe=timeframe,
             count=settings.data.lookback_bars,
         )
+        _log(f"Data fetch complete (rows={len(dataframe)})")
 
+        _log("Running backtest engine...")
         trades = run_backtest(
             dataframe,
             ema_period=settings.strategy.ema_period,
             pullback_lookback=5,
             take_profit_rr=settings.strategy.take_profit_rr,
             allowed_directions=allowed_directions,
+            progress_callback=lambda done, total: _print_progress(
+                done=done,
+                total=total,
+                state=progress_state,
+            ),
         )
+        print()
+        _log(f"Backtest complete (trades={len(trades)})")
+
+        _log("Calculating metrics...")
         metrics = calculate_metrics(trades)
+        _log("Metrics calculation complete")
 
         print(f"Mode: {mode}")
         print(f"Symbol: {symbol}")
@@ -84,10 +111,35 @@ def main() -> int:
         if not trades:
             print("No trades generated.")
 
+        elapsed = perf_counter() - started_at
+        _log(f"Run finished in {elapsed:.2f}s")
         return 0
     finally:
         if client.is_connected():
+            _log("Shutting down MT5 client...")
             client.shutdown()
+            _log("MT5 shutdown complete")
+
+
+def _log(message: str) -> None:
+    print(f"[run_backtest] {message}", flush=True)
+
+
+def _print_progress(*, done: int, total: int, state: dict[str, int]) -> None:
+    if total <= 0:
+        return
+    percent = int(min(100, max(0, (done * 100) // total)))
+    if percent == state["last_percent"]:
+        return
+    state["last_percent"] = percent
+    bar_width = 20
+    filled = (percent * bar_width) // 100
+    bar = ("#" * filled).ljust(bar_width, "-")
+    print(
+        f"\r[run_backtest] Backtest progress: [{bar}] {percent:3d}% ({done}/{total})",
+        end="",
+        flush=True,
+    )
 
 
 def _parse_args() -> argparse.Namespace:

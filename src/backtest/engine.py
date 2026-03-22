@@ -7,7 +7,7 @@ It contains no MT5 or live execution behavior.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 import pandas as pd
 
@@ -40,6 +40,7 @@ def run_backtest(
     pullback_lookback: int = 5,
     take_profit_rr: float = 1.5,
     allowed_directions: set[str] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[BacktestTrade]:
     """Run a deterministic one-trade-at-a-time backtest over OHLCV candles."""
 
@@ -47,9 +48,13 @@ def run_backtest(
     _validate_allowed_directions(allowed_directions)
     ordered = dataframe.sort_values("time").reset_index(drop=True)
     trades: list[BacktestTrade] = []
+    total_bars = len(ordered)
 
     index = 0
+    if progress_callback is not None:
+        progress_callback(0, total_bars)
     while index < len(ordered):
+        current_index = index
         window = ordered.iloc[: index + 1]
         try:
             decision = evaluate_icc_v1(
@@ -62,17 +67,25 @@ def run_backtest(
             # Warm-up period: strategy may need more rows before evaluation is possible.
             if "requires at least" in str(exc):
                 index += 1
+                if progress_callback is not None:
+                    progress_callback(index, total_bars)
                 continue
             raise
 
         if decision.signal == "NONE":
             index += 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
             continue
         if allowed_directions is not None and decision.signal not in allowed_directions:
             index += 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
             continue
         if decision.stop_loss is None or decision.take_profit is None:
             index += 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
             continue
 
         trade = _simulate_trade(
@@ -82,6 +95,17 @@ def run_backtest(
         )
         trades.append(trade)
         index = trade.exit_index + 1
+        if progress_callback is not None:
+            progress_callback(index, total_bars)
+
+        # Guard against no-forward-progress edge cases.
+        if index <= current_index:
+            index = current_index + 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
+
+    if progress_callback is not None:
+        progress_callback(total_bars, total_bars)
 
     return trades
 
