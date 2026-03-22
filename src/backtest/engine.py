@@ -40,12 +40,21 @@ def run_backtest(
     pullback_lookback: int = 5,
     take_profit_rr: float = 1.5,
     allowed_directions: set[str] | None = None,
+    session_start_hour: int | None = None,
+    session_end_hour: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[BacktestTrade]:
-    """Run a deterministic one-trade-at-a-time backtest over OHLCV candles."""
+    """Run a deterministic one-trade-at-a-time backtest over OHLCV candles.
+
+    Session filtering, when configured, applies to entry generation only.
+    """
 
     _validate_backtest_input(dataframe)
     _validate_allowed_directions(allowed_directions)
+    _validate_session_hours(
+        session_start_hour=session_start_hour,
+        session_end_hour=session_end_hour,
+    )
     ordered = dataframe.sort_values("time").reset_index(drop=True)
     trades: list[BacktestTrade] = []
     total_bars = len(ordered)
@@ -78,6 +87,16 @@ def run_backtest(
                 progress_callback(index, total_bars)
             continue
         if allowed_directions is not None and decision.signal not in allowed_directions:
+            index += 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
+            continue
+        entry_time = ordered.iloc[index]["time"]
+        if not _is_entry_hour_allowed(
+            entry_time=entry_time,
+            session_start_hour=session_start_hour,
+            session_end_hour=session_end_hour,
+        ):
             index += 1
             if progress_callback is not None:
                 progress_callback(index, total_bars)
@@ -199,3 +218,51 @@ def _validate_allowed_directions(allowed_directions: set[str] | None) -> None:
     invalid = set(allowed_directions).difference({"BUY", "SELL"})
     if invalid:
         raise ValueError(f"allowed_directions contains invalid values: {sorted(invalid)}")
+
+
+def _validate_session_hours(
+    *,
+    session_start_hour: int | None,
+    session_end_hour: int | None,
+) -> None:
+    if (session_start_hour is None) != (session_end_hour is None):
+        raise ValueError("session_start_hour and session_end_hour must be set together")
+    if session_start_hour is None and session_end_hour is None:
+        return
+    if not (0 <= session_start_hour <= 23):
+        raise ValueError("session_start_hour must be between 0 and 23")
+    if not (0 <= session_end_hour <= 23):
+        raise ValueError("session_end_hour must be between 0 and 23")
+    if session_start_hour == session_end_hour:
+        raise ValueError(
+            "session_start_hour and session_end_hour must differ; "
+            "omit both to allow all hours"
+        )
+
+
+def _is_entry_hour_allowed(
+    *,
+    entry_time: object,
+    session_start_hour: int | None,
+    session_end_hour: int | None,
+) -> bool:
+    if session_start_hour is None and session_end_hour is None:
+        return True
+
+    hour = _to_utc_hour(entry_time)
+    if session_start_hour < session_end_hour:
+        return session_start_hour <= hour < session_end_hour
+    return hour >= session_start_hour or hour < session_end_hour
+
+
+def _to_utc_hour(entry_time: object) -> int:
+    """Return hour-of-day in UTC from entry_time.
+
+    Naive datetimes are treated as UTC by convention.
+    """
+    timestamp = pd.Timestamp(entry_time)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    else:
+        timestamp = timestamp.tz_convert("UTC")
+    return int(timestamp.hour)
