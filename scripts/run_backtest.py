@@ -32,6 +32,7 @@ def main() -> int:
     session_start_hour = args.session_start_hour
     session_end_hour = args.session_end_hour
     htf_bias_mode = args.htf_bias
+    date_split_mode = args.date_split
     htf_bias_by_time: dict[pd.Timestamp, str] | None = None
     progress_state = {"last_percent": -1}
     _log(
@@ -43,6 +44,7 @@ def main() -> int:
     else:
         _log(f"Session filter UTC: {session_start_hour:02d}-{session_end_hour:02d}")
     _log(f"HTF bias filter: {htf_bias_mode}")
+    _log(f"Date split mode: {date_split_mode}")
 
     try:
         _log("Initializing MT5 client...")
@@ -148,6 +150,33 @@ def main() -> int:
         print("Top 5 losing trades:")
         _print_trade_list(_top_losing_trades(trades, limit=5))
 
+        if date_split_mode == "halves":
+            print("Date split summary:")
+            for split_name, split_df in _split_dataframe_for_walkforward(dataframe):
+                if split_df.empty:
+                    print(f"{split_name}: no data")
+                    continue
+                split_range = _split_date_range_text(split_df)
+
+                split_trades = run_backtest(
+                    split_df,
+                    ema_period=settings.strategy.ema_period,
+                    pullback_lookback=5,
+                    take_profit_rr=settings.strategy.take_profit_rr,
+                    allowed_directions=allowed_directions,
+                    session_start_hour=session_start_hour,
+                    session_end_hour=session_end_hour,
+                    htf_bias_by_time=htf_bias_by_time,
+                    progress_callback=None,
+                )
+                split_metrics = calculate_metrics(split_trades)
+                print(
+                    f"{split_name} ({split_range}): trades={split_metrics.total_trades} "
+                    f"win_rate={split_metrics.win_rate:.2f}% "
+                    f"total_profit={split_metrics.total_profit:.5f} "
+                    f"max_drawdown={split_metrics.max_drawdown:.5f}"
+                )
+
         if not trades:
             print("No trades generated.")
 
@@ -207,6 +236,12 @@ def _parse_args() -> argparse.Namespace:
         choices=("none", "h1-ema200"),
         default="none",
         help="Optional higher-timeframe bias filter: none or H1 close vs EMA(200).",
+    )
+    parser.add_argument(
+        "--date-split",
+        choices=("none", "halves"),
+        default="none",
+        help="Optional text-only robustness split reporting: none or early/later halves.",
     )
     return parser.parse_args()
 
@@ -326,33 +361,27 @@ def _print_trade_list(trades: list[BacktestTrade]) -> None:
         )
 
 
-def _print_monthly_breakdown(trades: list[BacktestTrade]) -> None:
-    """Print per-month trades/profit/win-rate by UTC entry month."""
-    if not trades:
-        print("none")
-        return
+def _split_dataframe_for_walkforward(dataframe: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+    """Split chronologically into early/later contiguous UTC time ranges."""
+    ordered = dataframe.copy()
+    ordered["time"] = _normalize_utc_datetime_key(ordered["time"])
+    ordered = ordered.sort_values("time").reset_index(drop=True)
 
-    by_month: dict[str, dict[str, float]] = {}
+    if ordered.empty:
+        return [("early_period", ordered.copy()), ("later_period", ordered.copy())]
 
-    for trade in trades:
-        month_key = _to_utc_timestamp(trade.entry_time).strftime("%Y-%m")
-        if month_key not in by_month:
-            by_month[month_key] = {"trades": 0.0, "wins": 0.0, "profit": 0.0}
-        by_month[month_key]["trades"] += 1
-        if trade.profit > 0:
-            by_month[month_key]["wins"] += 1
-        by_month[month_key]["profit"] += float(trade.profit)
+    midpoint = len(ordered) // 2
+    split_time = ordered.iloc[midpoint]["time"]
+    return [
+        ("early_period", ordered[ordered["time"] <= split_time].reset_index(drop=True)),
+        ("later_period", ordered[ordered["time"] > split_time].reset_index(drop=True)),
+    ]
 
-    for month_key in sorted(by_month.keys()):
-        month_data = by_month[month_key]
-        total = int(month_data["trades"])
-        wins = int(month_data["wins"])
-        win_rate = (wins / total) * 100.0 if total > 0 else 0.0
-        print(
-            f"{month_key}: trades={total} "
-            f"profit={month_data['profit']:.5f} "
-            f"win_rate={win_rate:.2f}%"
-        )
+
+def _split_date_range_text(split_df: pd.DataFrame) -> str:
+    start = _to_utc_timestamp(split_df.iloc[0]["time"]).strftime("%Y-%m-%d")
+    end = _to_utc_timestamp(split_df.iloc[-1]["time"]).strftime("%Y-%m-%d")
+    return f"{start} to {end} UTC"
 
 
 if __name__ == "__main__":
