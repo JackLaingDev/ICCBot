@@ -42,6 +42,7 @@ def run_backtest(
     allowed_directions: set[str] | None = None,
     session_start_hour: int | None = None,
     session_end_hour: int | None = None,
+    htf_bias_by_time: dict[object, str] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[BacktestTrade]:
     """Run a deterministic one-trade-at-a-time backtest over OHLCV candles.
@@ -55,6 +56,7 @@ def run_backtest(
         session_start_hour=session_start_hour,
         session_end_hour=session_end_hour,
     )
+    _validate_htf_bias_by_time(htf_bias_by_time)
     ordered = dataframe.sort_values("time").reset_index(drop=True)
     trades: list[BacktestTrade] = []
     total_bars = len(ordered)
@@ -96,6 +98,15 @@ def run_backtest(
             entry_time=entry_time,
             session_start_hour=session_start_hour,
             session_end_hour=session_end_hour,
+        ):
+            index += 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
+            continue
+        if not _is_entry_aligned_with_htf_bias(
+            entry_time=entry_time,
+            signal=decision.signal,
+            htf_bias_by_time=htf_bias_by_time,
         ):
             index += 1
             if progress_callback is not None:
@@ -255,6 +266,36 @@ def _is_entry_hour_allowed(
     return hour >= session_start_hour or hour < session_end_hour
 
 
+def _is_entry_aligned_with_htf_bias(
+    *,
+    entry_time: object,
+    signal: str,
+    htf_bias_by_time: dict[object, str] | None,
+) -> bool:
+    if htf_bias_by_time is None:
+        return True
+
+    bias = htf_bias_by_time.get(_to_utc_timestamp(entry_time))
+    if bias is None:
+        return False
+
+    if signal == "BUY":
+        return bias == "BULLISH"
+    if signal == "SELL":
+        return bias == "BEARISH"
+    return False
+
+
+def _validate_htf_bias_by_time(htf_bias_by_time: dict[object, str] | None) -> None:
+    if htf_bias_by_time is None:
+        return
+    valid = {"BULLISH", "BEARISH", "NEUTRAL"}
+    for key, value in htf_bias_by_time.items():
+        _to_utc_timestamp(key)
+        if value not in valid:
+            raise ValueError(f"htf_bias_by_time contains invalid value: {value!r}")
+
+
 def _to_utc_hour(entry_time: object) -> int:
     """Return hour-of-day in UTC from entry_time.
 
@@ -266,3 +307,10 @@ def _to_utc_hour(entry_time: object) -> int:
     else:
         timestamp = timestamp.tz_convert("UTC")
     return int(timestamp.hour)
+
+
+def _to_utc_timestamp(value: object) -> pd.Timestamp:
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
