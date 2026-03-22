@@ -1,4 +1,4 @@
-"""Minimal ICC v1 strategy evaluation.
+"""Minimal ICC v2 structure-based strategy evaluation.
 
 This module is pure strategy logic only:
 - consumes normalized OHLCV dataframe input
@@ -23,13 +23,14 @@ def evaluate_icc_v1(
     ema_period: int = 200,
     pullback_lookback: int = 5,
     take_profit_rr: float = 1.5,
+    swing_window: int = 2,
 ) -> StrategyDecision:
-    """Evaluate a simple ICC-style signal from OHLCV data.
+    """Evaluate a minimal structure-based ICC signal.
 
     Rules:
-    - Indication: close above/below EMA(200)
-    - Correction: recent pullback against trend over a short lookback window
-    - Continuation: close breaks previous candle high/low after pullback
+    - Indication: break of previous swing high/low (BOS)
+    - Correction: pullback against BOS direction after the break
+    - Continuation: current close breaks previous candle in BOS direction
     """
 
     _validate_inputs(
@@ -37,28 +38,45 @@ def evaluate_icc_v1(
         ema_period=ema_period,
         pullback_lookback=pullback_lookback,
         take_profit_rr=take_profit_rr,
+        swing_window=swing_window,
     )
 
     # Strategy evaluation is order-sensitive; enforce chronological ordering.
     working = dataframe.sort_values("time").reset_index(drop=True).copy()
     for column_name in PRICE_COLUMNS:
         working[column_name] = pd.to_numeric(working[column_name], errors="raise")
-    working["ema"] = working["close"].ewm(span=ema_period, adjust=False).mean()
 
+    current_index = len(working) - 1
     current = working.iloc[-1]
     previous = working.iloc[-2]
-    pullback_window = working.iloc[-(pullback_lookback + 1) : -1]
 
-    if current["close"] > current["ema"]:
-        has_pullback = bool((pullback_window["low"] <= pullback_window["ema"]).any())
+    swing_high_indexes, swing_low_indexes = _find_swings(working, swing_window=swing_window)
+    bos = _find_latest_bos(
+        dataframe=working,
+        swing_high_indexes=swing_high_indexes,
+        swing_low_indexes=swing_low_indexes,
+        swing_window=swing_window,
+        end_index=current_index - 1,
+    )
+    if bos is None:
+        return StrategyDecision(signal="NONE", reason="no_structure_break")
+
+    if current_index - bos["index"] > pullback_lookback:
+        return StrategyDecision(signal="NONE", reason="bos_too_old")
+
+    post_bos = working.iloc[bos["index"] + 1 : current_index]
+    if post_bos.empty:
+        return StrategyDecision(signal="NONE", reason="no_pullback_window")
+
+    if bos["direction"] == "BUY":
+        has_pullback = bool((post_bos["low"] <= bos["level"]).any())
         if not has_pullback:
             return StrategyDecision(signal="NONE", reason="no_bullish_pullback")
-
         if current["close"] <= previous["high"]:
             return StrategyDecision(signal="NONE", reason="no_bullish_continuation")
 
         entry = float(current["close"])
-        stop_loss = float(pullback_window["low"].min())
+        stop_loss = float(post_bos["low"].min())
         risk = entry - stop_loss
         if risk <= 0:
             return StrategyDecision(signal="NONE", reason="invalid_bullish_stop")
@@ -71,29 +89,85 @@ def evaluate_icc_v1(
             reason="buy_setup",
         )
 
-    if current["close"] < current["ema"]:
-        has_pullback = bool((pullback_window["high"] >= pullback_window["ema"]).any())
-        if not has_pullback:
-            return StrategyDecision(signal="NONE", reason="no_bearish_pullback")
+    has_pullback = bool((post_bos["high"] >= bos["level"]).any())
+    if not has_pullback:
+        return StrategyDecision(signal="NONE", reason="no_bearish_pullback")
+    if current["close"] >= previous["low"]:
+        return StrategyDecision(signal="NONE", reason="no_bearish_continuation")
 
-        if current["close"] >= previous["low"]:
-            return StrategyDecision(signal="NONE", reason="no_bearish_continuation")
+    entry = float(current["close"])
+    stop_loss = float(post_bos["high"].max())
+    risk = stop_loss - entry
+    if risk <= 0:
+        return StrategyDecision(signal="NONE", reason="invalid_bearish_stop")
 
-        entry = float(current["close"])
-        stop_loss = float(pullback_window["high"].max())
-        risk = stop_loss - entry
-        if risk <= 0:
-            return StrategyDecision(signal="NONE", reason="invalid_bearish_stop")
+    take_profit = entry - (risk * take_profit_rr)
+    return StrategyDecision(
+        signal="SELL",
+        stop_loss=stop_loss,
+        take_profit=float(take_profit),
+        reason="sell_setup",
+    )
 
-        take_profit = entry - (risk * take_profit_rr)
-        return StrategyDecision(
-            signal="SELL",
-            stop_loss=stop_loss,
-            take_profit=float(take_profit),
-            reason="sell_setup",
-        )
 
-    return StrategyDecision(signal="NONE", reason="neutral_bias")
+def _find_swings(
+    dataframe: pd.DataFrame, *, swing_window: int
+) -> tuple[list[int], list[int]]:
+    swing_high_indexes: list[int] = []
+    swing_low_indexes: list[int] = []
+    highs = dataframe["high"]
+    lows = dataframe["low"]
+
+    for idx in range(swing_window, len(dataframe) - swing_window):
+        left_highs = highs.iloc[idx - swing_window : idx]
+        right_highs = highs.iloc[idx + 1 : idx + 1 + swing_window]
+        left_lows = lows.iloc[idx - swing_window : idx]
+        right_lows = lows.iloc[idx + 1 : idx + 1 + swing_window]
+
+        if highs.iloc[idx] > left_highs.max() and highs.iloc[idx] > right_highs.max():
+            swing_high_indexes.append(idx)
+        if lows.iloc[idx] < left_lows.min() and lows.iloc[idx] < right_lows.min():
+            swing_low_indexes.append(idx)
+
+    return swing_high_indexes, swing_low_indexes
+
+
+def _find_latest_bos(
+    *,
+    dataframe: pd.DataFrame,
+    swing_high_indexes: list[int],
+    swing_low_indexes: list[int],
+    swing_window: int,
+    end_index: int,
+) -> dict[str, float | int | str] | None:
+    latest_bos: dict[str, float | int | str] | None = None
+    close_series = dataframe["close"]
+    high_series = dataframe["high"]
+    low_series = dataframe["low"]
+
+    for idx in range(1, end_index + 1):
+        # BOS must leave at least one candle for pullback before continuation.
+        if idx >= end_index:
+            continue
+
+        # Only use confirmed swings to avoid lookahead:
+        # swing at `s` is confirmed only after `s + swing_window` candles.
+        previous_swing_highs = [s for s in swing_high_indexes if (s + swing_window) < idx]
+        previous_swing_lows = [s for s in swing_low_indexes if (s + swing_window) < idx]
+
+        if previous_swing_highs:
+            swing_idx = previous_swing_highs[-1]
+            swing_high = float(high_series.iloc[swing_idx])
+            if float(close_series.iloc[idx]) > swing_high:
+                latest_bos = {"direction": "BUY", "index": idx, "level": swing_high}
+
+        if previous_swing_lows:
+            swing_idx = previous_swing_lows[-1]
+            swing_low = float(low_series.iloc[swing_idx])
+            if float(close_series.iloc[idx]) < swing_low:
+                latest_bos = {"direction": "SELL", "index": idx, "level": swing_low}
+
+    return latest_bos
 
 
 def _validate_inputs(
@@ -102,6 +176,7 @@ def _validate_inputs(
     ema_period: int,
     pullback_lookback: int,
     take_profit_rr: float,
+    swing_window: int,
 ) -> None:
     if dataframe.empty:
         raise ValueError("dataframe must not be empty")
@@ -110,14 +185,17 @@ def _validate_inputs(
     if missing:
         raise ValueError(f"dataframe is missing required columns: {sorted(missing)}")
 
+    # Kept for backward compatibility with existing callers.
     if ema_period <= 1:
         raise ValueError("ema_period must be > 1")
     if pullback_lookback < 2:
         raise ValueError("pullback_lookback must be >= 2")
     if take_profit_rr <= 0:
         raise ValueError("take_profit_rr must be > 0")
+    if swing_window < 1:
+        raise ValueError("swing_window must be >= 1")
 
-    minimum_rows = max(ema_period + 2, pullback_lookback + 2)
+    minimum_rows = max((swing_window * 2) + 5, pullback_lookback + 3)
     if len(dataframe) < minimum_rows:
         raise ValueError(
             f"dataframe requires at least {minimum_rows} rows for configured parameters"
@@ -128,3 +206,6 @@ def _validate_inputs(
             pd.to_numeric(dataframe[column_name], errors="raise")
         except Exception as exc:
             raise ValueError(f"{column_name} must be numeric.") from exc
+
+    if dataframe[list(PRICE_COLUMNS)].isna().any().any():
+        raise ValueError("high, low, and close must not contain missing values")
