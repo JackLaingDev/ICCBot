@@ -139,6 +139,8 @@ def main() -> int:
         )
         print("Profit by entry hour: " + _format_hour_profit(trades))
         print("Win rate by entry hour: " + _format_hour_win_rate(trades))
+        print("Monthly breakdown (UTC entry month):")
+        _print_monthly_breakdown(trades)
         print(f"Average trade duration (bars): {metrics.average_trade_duration_bars:.2f}")
         print("Top 5 winning trades:")
         _print_trade_list(_top_winning_trades(trades, limit=5))
@@ -246,6 +248,10 @@ def _build_h1_ema_bias_by_time(
 
 
 def _to_utc_timestamp(value: object) -> pd.Timestamp:
+    """Normalize value to UTC timestamp.
+
+    Naive datetimes are treated as UTC by convention.
+    """
     timestamp = pd.Timestamp(value)
     if timestamp.tzinfo is None:
         return timestamp.tz_localize("UTC")
@@ -317,6 +323,35 @@ def _print_trade_list(trades: list[BacktestTrade]) -> None:
             f"{index}. {trade.direction} "
             f"entry={trade.entry_time} exit={trade.exit_time} "
             f"reason={trade.exit_reason} profit={trade.profit:.5f} rr={rr_text}"
+        )
+
+
+def _print_monthly_breakdown(trades: list[BacktestTrade]) -> None:
+    """Print per-month trades/profit/win-rate by UTC entry month."""
+    if not trades:
+        print("none")
+        return
+
+    by_month: dict[str, dict[str, float]] = {}
+
+    for trade in trades:
+        month_key = _to_utc_timestamp(trade.entry_time).strftime("%Y-%m")
+        if month_key not in by_month:
+            by_month[month_key] = {"trades": 0.0, "wins": 0.0, "profit": 0.0}
+        by_month[month_key]["trades"] += 1
+        if trade.profit > 0:
+            by_month[month_key]["wins"] += 1
+        by_month[month_key]["profit"] += float(trade.profit)
+
+    for month_key in sorted(by_month.keys()):
+        month_data = by_month[month_key]
+        total = int(month_data["trades"])
+        wins = int(month_data["wins"])
+        win_rate = (wins / total) * 100.0 if total > 0 else 0.0
+        print(
+            f"{month_key}: trades={total} "
+            f"profit={month_data['profit']:.5f} "
+            f"win_rate={win_rate:.2f}%"
         )
 
 
