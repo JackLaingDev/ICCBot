@@ -24,6 +24,7 @@ def evaluate_icc_v1(
     pullback_lookback: int = 5,
     take_profit_rr: float = 1.5,
     swing_window: int = 2,
+    validate_inputs: bool = True,
 ) -> StrategyDecision:
     """Evaluate a minimal structure-based ICC signal.
 
@@ -33,18 +34,25 @@ def evaluate_icc_v1(
     - Continuation: current close breaks previous candle in BOS direction
     """
 
-    _validate_inputs(
-        dataframe=dataframe,
-        ema_period=ema_period,
-        pullback_lookback=pullback_lookback,
-        take_profit_rr=take_profit_rr,
-        swing_window=swing_window,
-    )
+    minimum_rows = max((swing_window * 2) + 5, pullback_lookback + 3)
+    if len(dataframe) < minimum_rows:
+        raise ValueError(
+            f"dataframe requires at least {minimum_rows} rows for configured parameters"
+        )
 
-    # Strategy evaluation is order-sensitive; enforce chronological ordering.
-    working = dataframe.sort_values("time").reset_index(drop=True).copy()
-    for column_name in PRICE_COLUMNS:
-        working[column_name] = pd.to_numeric(working[column_name], errors="raise")
+    if validate_inputs:
+        _validate_inputs(
+            dataframe=dataframe,
+            ema_period=ema_period,
+            pullback_lookback=pullback_lookback,
+            take_profit_rr=take_profit_rr,
+            swing_window=swing_window,
+        )
+        # Strategy evaluation is order-sensitive; enforce chronological ordering.
+        working = dataframe.sort_values("time").reset_index(drop=True).copy()
+    else:
+        # Fast-path for backtest engine: input is already validated and sorted once.
+        working = dataframe
 
     current_index = len(working) - 1
     current = working.iloc[-1]
@@ -144,6 +152,10 @@ def _find_latest_bos(
     close_series = dataframe["close"]
     high_series = dataframe["high"]
     low_series = dataframe["low"]
+    high_pointer = 0
+    low_pointer = 0
+    last_confirmed_high_idx: int | None = None
+    last_confirmed_low_idx: int | None = None
 
     for idx in range(1, end_index + 1):
         # BOS must leave at least one candle for pullback before continuation.
@@ -152,18 +164,26 @@ def _find_latest_bos(
 
         # Only use confirmed swings to avoid lookahead:
         # swing at `s` is confirmed only after `s + swing_window` candles.
-        previous_swing_highs = [s for s in swing_high_indexes if (s + swing_window) < idx]
-        previous_swing_lows = [s for s in swing_low_indexes if (s + swing_window) < idx]
+        while (
+            high_pointer < len(swing_high_indexes)
+            and (swing_high_indexes[high_pointer] + swing_window) < idx
+        ):
+            last_confirmed_high_idx = swing_high_indexes[high_pointer]
+            high_pointer += 1
+        while (
+            low_pointer < len(swing_low_indexes)
+            and (swing_low_indexes[low_pointer] + swing_window) < idx
+        ):
+            last_confirmed_low_idx = swing_low_indexes[low_pointer]
+            low_pointer += 1
 
-        if previous_swing_highs:
-            swing_idx = previous_swing_highs[-1]
-            swing_high = float(high_series.iloc[swing_idx])
+        if last_confirmed_high_idx is not None:
+            swing_high = float(high_series.iloc[last_confirmed_high_idx])
             if float(close_series.iloc[idx]) > swing_high:
                 latest_bos = {"direction": "BUY", "index": idx, "level": swing_high}
 
-        if previous_swing_lows:
-            swing_idx = previous_swing_lows[-1]
-            swing_low = float(low_series.iloc[swing_idx])
+        if last_confirmed_low_idx is not None:
+            swing_low = float(low_series.iloc[last_confirmed_low_idx])
             if float(close_series.iloc[idx]) < swing_low:
                 latest_bos = {"direction": "SELL", "index": idx, "level": swing_low}
 
