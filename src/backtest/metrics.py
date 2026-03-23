@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pandas as pd
+
 from src.backtest.engine import BacktestTrade
 
 
@@ -101,7 +103,9 @@ def calculate_metrics(trades: list[BacktestTrade]) -> BacktestMetrics:
 
 
 def _entry_hour_key(entry_time: object) -> str:
-    hour_value = getattr(entry_time, "hour", None)
-    if isinstance(hour_value, int) and 0 <= hour_value <= 23:
-        return f"{hour_value:02d}"
-    return "unknown"
+    timestamp = pd.Timestamp(entry_time)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.tz_localize("UTC")
+    else:
+        timestamp = timestamp.tz_convert("UTC")
+    return f"{int(timestamp.hour):02d}"

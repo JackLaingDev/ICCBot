@@ -225,6 +225,44 @@ class BacktestEngineTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(trades), 1)
 
+    def test_volatility_filter_high_only_blocks_low_vol_entries(self) -> None:
+        data = _bars_with_hours([7, 8, 9, 10, 11])
+        entry_regime_by_time = {
+            pd.Timestamp(row["time"]).tz_convert("UTC"): "low_vol"
+            for _, row in data.iterrows()
+        }
+
+        def always_sell(_: pd.DataFrame, **__: object) -> StrategyDecision:
+            return StrategyDecision(signal="SELL", stop_loss=1.20, take_profit=0.80)
+
+        with patch("src.backtest.engine.evaluate_icc_v1", side_effect=always_sell):
+            trades = run_backtest(
+                data,
+                entry_regime_by_time=entry_regime_by_time,
+                required_entry_regime="high_vol",
+            )
+
+        self.assertEqual(trades, [])
+
+    def test_volatility_filter_high_only_allows_high_vol_entries(self) -> None:
+        data = _bars_with_hours([7, 8, 9, 10, 11])
+        entry_regime_by_time = {
+            pd.Timestamp(row["time"]).tz_convert("UTC"): "high_vol"
+            for _, row in data.iterrows()
+        }
+
+        def always_sell(_: pd.DataFrame, **__: object) -> StrategyDecision:
+            return StrategyDecision(signal="SELL", stop_loss=1.20, take_profit=0.80)
+
+        with patch("src.backtest.engine.evaluate_icc_v1", side_effect=always_sell):
+            trades = run_backtest(
+                data,
+                entry_regime_by_time=entry_regime_by_time,
+                required_entry_regime="high_vol",
+            )
+
+        self.assertGreaterEqual(len(trades), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

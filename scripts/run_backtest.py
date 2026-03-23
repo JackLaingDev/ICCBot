@@ -33,7 +33,10 @@ def main() -> int:
     session_end_hour = args.session_end_hour
     htf_bias_mode = args.htf_bias
     date_split_mode = args.date_split
+    vol_filter_mode = args.vol_filter
     htf_bias_by_time: dict[pd.Timestamp, str] | None = None
+    entry_regime_by_time: dict[pd.Timestamp, str] | None = None
+    required_entry_regime: str | None = None
     progress_state = {"last_percent": -1}
     _log(
         f"Prepared run config: symbol={symbol}, timeframe={timeframe}, "
@@ -44,6 +47,7 @@ def main() -> int:
     else:
         _log(f"Session filter UTC: {session_start_hour:02d}-{session_end_hour:02d}")
     _log(f"HTF bias filter: {htf_bias_mode}")
+    _log(f"Volatility regime filter: {vol_filter_mode}")
     _log(f"Date split mode: {date_split_mode}")
 
     try:
@@ -59,6 +63,9 @@ def main() -> int:
             count=settings.data.lookback_bars,
         )
         _log(f"Data fetch complete (rows={len(dataframe)})")
+        entry_regime_by_time = _build_volatility_regime_by_time(dataframe)
+        if vol_filter_mode == "high-only":
+            required_entry_regime = "high_vol"
 
         if htf_bias_mode == "h1-ema200":
             _log("Fetching H1 data for HTF bias...")
@@ -87,6 +94,8 @@ def main() -> int:
             session_start_hour=session_start_hour,
             session_end_hour=session_end_hour,
             htf_bias_by_time=htf_bias_by_time,
+            entry_regime_by_time=entry_regime_by_time,
+            required_entry_regime=required_entry_regime,
             progress_callback=lambda done, total: _print_progress(
                 done=done,
                 total=total,
@@ -110,6 +119,7 @@ def main() -> int:
             )
         )
         print(f"HTF bias filter: {htf_bias_mode}")
+        print(f"Volatility regime filter: {vol_filter_mode}")
         print(f"Symbol: {symbol}")
         print(f"Timeframe: {timeframe}")
         print(f"Rows fetched: {len(dataframe)}")
@@ -143,6 +153,8 @@ def main() -> int:
         print("Win rate by entry hour: " + _format_hour_win_rate(trades))
         print("Monthly breakdown (UTC entry month):")
         _print_monthly_breakdown(trades)
+        print("Regime breakdown (M15 range median split):")
+        _print_regime_breakdown(trades, entry_regime_by_time or {})
         print(f"Average trade duration (bars): {metrics.average_trade_duration_bars:.2f}")
         print("Top 5 winning trades:")
         _print_trade_list(_top_winning_trades(trades, limit=5))
@@ -167,6 +179,8 @@ def main() -> int:
                     session_start_hour=session_start_hour,
                     session_end_hour=session_end_hour,
                     htf_bias_by_time=htf_bias_by_time,
+                    entry_regime_by_time=entry_regime_by_time,
+                    required_entry_regime=required_entry_regime,
                     progress_callback=None,
                 )
                 split_metrics = calculate_metrics(split_trades)
@@ -242,6 +256,12 @@ def _parse_args() -> argparse.Namespace:
         choices=("none", "halves"),
         default="none",
         help="Optional text-only robustness split reporting: none or early/later halves.",
+    )
+    parser.add_argument(
+        "--vol-filter",
+        choices=("none", "high-only"),
+        default="none",
+        help="Optional entry filter by volatility regime: none or high-only.",
     )
     return parser.parse_args()
 
@@ -382,6 +402,90 @@ def _split_date_range_text(split_df: pd.DataFrame) -> str:
     start = _to_utc_timestamp(split_df.iloc[0]["time"]).strftime("%Y-%m-%d")
     end = _to_utc_timestamp(split_df.iloc[-1]["time"]).strftime("%Y-%m-%d")
     return f"{start} to {end} UTC"
+
+
+def _build_volatility_regime_by_time(dataframe: pd.DataFrame) -> dict[pd.Timestamp, str]:
+    """Classify each M15 bar into low/high volatility by median candle range.
+
+    Assumptions:
+    - Range is `high - low` in raw price units.
+    - Threshold at each bar uses only historical ranges up to prior bar
+      (expanding median) to avoid lookahead.
+    - Bars with range equal to median are treated as `low_vol`.
+    """
+    working = dataframe[["time", "high", "low"]].copy()
+    working["time"] = _normalize_utc_datetime_key(working["time"])
+    working["high"] = pd.to_numeric(working["high"], errors="coerce")
+    working["low"] = pd.to_numeric(working["low"], errors="coerce")
+    working = working.dropna(subset=["time", "high", "low"]).sort_values("time")
+    if working.empty:
+        return {}
+
+    working["range"] = working["high"] - working["low"]
+    working["threshold"] = working["range"].expanding(min_periods=1).median().shift(1)
+    working["threshold"] = working["threshold"].fillna(working["range"])
+    working["regime"] = "low_vol"
+    working.loc[working["range"] > working["threshold"], "regime"] = "high_vol"
+    regime_series = working.set_index("time")["regime"]
+    return regime_series.to_dict()
+
+
+def _print_regime_breakdown(
+    trades: list[BacktestTrade],
+    regime_by_time: dict[pd.Timestamp, str],
+) -> None:
+    """Print trade metrics grouped by regime at trade entry time.
+
+    Assumptions:
+    - Regime is assigned from the entry bar timestamp only.
+    - If an entry timestamp is missing in `regime_by_time`, bucket as `unknown`.
+    """
+    if not trades:
+        print("none")
+        return
+
+    buckets: dict[str, list[BacktestTrade]] = {}
+    for trade in trades:
+        regime = regime_by_time.get(_to_utc_timestamp(trade.entry_time), "unknown")
+        buckets.setdefault(regime, []).append(trade)
+
+    ordered_regimes = [name for name in ("low_vol", "high_vol", "unknown") if name in buckets]
+    for regime in ordered_regimes:
+        regime_metrics = calculate_metrics(buckets[regime])
+        print(
+            f"{regime}: trades={regime_metrics.total_trades} "
+            f"win_rate={regime_metrics.win_rate:.2f}% "
+            f"total_profit={regime_metrics.total_profit:.5f} "
+            f"max_drawdown={regime_metrics.max_drawdown:.5f}"
+        )
+
+
+def _print_monthly_breakdown(trades: list[BacktestTrade]) -> None:
+    """Print per-month trades/profit/win-rate by UTC entry month."""
+    if not trades:
+        print("none")
+        return
+
+    by_month: dict[str, dict[str, float]] = {}
+    for trade in trades:
+        month_key = _to_utc_timestamp(trade.entry_time).strftime("%Y-%m")
+        if month_key not in by_month:
+            by_month[month_key] = {"trades": 0.0, "wins": 0.0, "profit": 0.0}
+        by_month[month_key]["trades"] += 1
+        if trade.profit > 0:
+            by_month[month_key]["wins"] += 1
+        by_month[month_key]["profit"] += float(trade.profit)
+
+    for month_key in sorted(by_month.keys()):
+        month_data = by_month[month_key]
+        total = int(month_data["trades"])
+        wins = int(month_data["wins"])
+        win_rate = (wins / total) * 100.0 if total > 0 else 0.0
+        print(
+            f"{month_key}: trades={total} "
+            f"profit={month_data['profit']:.5f} "
+            f"win_rate={win_rate:.2f}%"
+        )
 
 
 if __name__ == "__main__":
