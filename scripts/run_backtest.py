@@ -1,4 +1,4 @@
-"""Run a minimal end-to-end backtest for EURUSD M15."""
+"""Run end-to-end backtests for configured strategy on EURUSD M15."""
 
 from __future__ import annotations
 
@@ -8,10 +8,12 @@ from time import perf_counter
 import pandas as pd
 
 from src.backtest.engine import BacktestTrade, run_backtest
+from src.backtest.velocity_engine import run_velocity_backtest
 from src.backtest.metrics import calculate_metrics
-from src.config.settings import load_settings
+from src.config.settings import AppSettings, load_settings
 from src.data.market_data import fetch_market_data
 from src.data.mt5_client import MT5Client
+from src.strategies.velocity_strategy import VelocityStrategyParams
 
 
 def main() -> int:
@@ -24,6 +26,9 @@ def main() -> int:
 
     settings = load_settings()
     _log("Settings loaded")
+    selected_strategy = args.strategy or settings.strategy.strategy_name
+    if selected_strategy not in {"icc", "velocity"}:
+        raise ValueError("strategy must be one of: icc, velocity")
 
     client = MT5Client()
     symbol = settings.trading.symbol
@@ -40,7 +45,7 @@ def main() -> int:
     progress_state = {"last_percent": -1}
     _log(
         f"Prepared run config: symbol={symbol}, timeframe={timeframe}, "
-        f"lookback_bars={settings.data.lookback_bars}"
+        f"lookback_bars={settings.data.lookback_bars}, strategy={selected_strategy}"
     )
     if session_start_hour is None:
         _log("Session filter: none (all UTC hours)")
@@ -85,23 +90,44 @@ def main() -> int:
             _log(f"HTF bias aligned to M15 bars (mapped={len(htf_bias_by_time)})")
 
         _log("Running backtest engine...")
-        trades = run_backtest(
-            dataframe,
-            ema_period=settings.strategy.ema_period,
-            pullback_lookback=5,
-            take_profit_rr=settings.strategy.take_profit_rr,
-            allowed_directions=allowed_directions,
-            session_start_hour=session_start_hour,
-            session_end_hour=session_end_hour,
-            htf_bias_by_time=htf_bias_by_time,
-            entry_regime_by_time=entry_regime_by_time,
-            required_entry_regime=required_entry_regime,
-            progress_callback=lambda done, total: _print_progress(
-                done=done,
-                total=total,
-                state=progress_state,
-            ),
-        )
+        if selected_strategy == "velocity":
+            velocity_params = _build_velocity_strategy_params(settings)
+            trades = run_velocity_backtest(
+                dataframe,
+                lookback_k=settings.strategy.velocity_lookback,
+                atr_period=settings.strategy.velocity_atr_period,
+                smoothing_span=settings.strategy.velocity_smoothing_span,
+                params=velocity_params,
+                allowed_directions=allowed_directions,
+                session_start_hour=session_start_hour,
+                session_end_hour=session_end_hour,
+                htf_bias_by_time=htf_bias_by_time,
+                entry_regime_by_time=entry_regime_by_time,
+                required_entry_regime=required_entry_regime,
+                progress_callback=lambda done, total: _print_progress(
+                    done=done,
+                    total=total,
+                    state=progress_state,
+                ),
+            )
+        else:
+            trades = run_backtest(
+                dataframe,
+                ema_period=settings.strategy.ema_period,
+                pullback_lookback=5,
+                take_profit_rr=settings.strategy.take_profit_rr,
+                allowed_directions=allowed_directions,
+                session_start_hour=session_start_hour,
+                session_end_hour=session_end_hour,
+                htf_bias_by_time=htf_bias_by_time,
+                entry_regime_by_time=entry_regime_by_time,
+                required_entry_regime=required_entry_regime,
+                progress_callback=lambda done, total: _print_progress(
+                    done=done,
+                    total=total,
+                    state=progress_state,
+                ),
+            )
         print()
         _log(f"Backtest complete (trades={len(trades)})")
 
@@ -110,6 +136,7 @@ def main() -> int:
         _log("Metrics calculation complete")
 
         print(f"Mode: {mode}")
+        print(f"Strategy: {selected_strategy}")
         print(
             "Session filter (UTC): "
             + (
@@ -170,19 +197,35 @@ def main() -> int:
                     continue
                 split_range = _split_date_range_text(split_df)
 
-                split_trades = run_backtest(
-                    split_df,
-                    ema_period=settings.strategy.ema_period,
-                    pullback_lookback=5,
-                    take_profit_rr=settings.strategy.take_profit_rr,
-                    allowed_directions=allowed_directions,
-                    session_start_hour=session_start_hour,
-                    session_end_hour=session_end_hour,
-                    htf_bias_by_time=htf_bias_by_time,
-                    entry_regime_by_time=entry_regime_by_time,
-                    required_entry_regime=required_entry_regime,
-                    progress_callback=None,
-                )
+                if selected_strategy == "velocity":
+                    split_trades = run_velocity_backtest(
+                        split_df,
+                        lookback_k=settings.strategy.velocity_lookback,
+                        atr_period=settings.strategy.velocity_atr_period,
+                        smoothing_span=settings.strategy.velocity_smoothing_span,
+                        params=_build_velocity_strategy_params(settings),
+                        allowed_directions=allowed_directions,
+                        session_start_hour=session_start_hour,
+                        session_end_hour=session_end_hour,
+                        htf_bias_by_time=htf_bias_by_time,
+                        entry_regime_by_time=entry_regime_by_time,
+                        required_entry_regime=required_entry_regime,
+                        progress_callback=None,
+                    )
+                else:
+                    split_trades = run_backtest(
+                        split_df,
+                        ema_period=settings.strategy.ema_period,
+                        pullback_lookback=5,
+                        take_profit_rr=settings.strategy.take_profit_rr,
+                        allowed_directions=allowed_directions,
+                        session_start_hour=session_start_hour,
+                        session_end_hour=session_end_hour,
+                        htf_bias_by_time=htf_bias_by_time,
+                        entry_regime_by_time=entry_regime_by_time,
+                        required_entry_regime=required_entry_regime,
+                        progress_callback=None,
+                    )
                 split_metrics = calculate_metrics(split_trades)
                 print(
                     f"{split_name} ({split_range}): trades={split_metrics.total_trades} "
@@ -226,7 +269,13 @@ def _print_progress(*, done: int, total: int, state: dict[str, int]) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run ICC backtest.")
+    parser = argparse.ArgumentParser(description="Run strategy backtest.")
+    parser.add_argument(
+        "--strategy",
+        choices=("icc", "velocity"),
+        default=None,
+        help="Optional strategy override. Defaults to STRATEGY_NAME from settings.",
+    )
     parser.add_argument(
         "--mode",
         choices=("normal", "short-only"),
@@ -264,6 +313,19 @@ def _parse_args() -> argparse.Namespace:
         help="Optional entry filter by volatility regime: none or high-only.",
     )
     return parser.parse_args()
+
+
+def _build_velocity_strategy_params(settings: AppSettings) -> VelocityStrategyParams:
+    strategy = settings.strategy
+    return VelocityStrategyParams(
+        entry_threshold=strategy.velocity_entry_threshold,
+        entry_persist=strategy.velocity_entry_persist,
+        drawdown_frac=strategy.velocity_drawdown_frac,
+        stop_atr_mult=strategy.velocity_stop_atr_mult,
+        cooldown_bars=strategy.velocity_cooldown_bars,
+        trend_filter_enabled=strategy.velocity_trend_filter_enabled,
+        trend_ema_period=strategy.velocity_trend_ema_period,
+    )
 
 
 def _build_h1_ema_bias_by_time(

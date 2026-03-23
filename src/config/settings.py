@@ -39,10 +39,21 @@ class TradingSettings:
 class StrategySettings:
     """Strategy parameter settings (data only, no strategy logic)."""
 
+    strategy_name: str
     ema_period: int
     take_profit_rr: float
     stop_loss_type: str
     atr_multiplier: float
+    velocity_lookback: int
+    velocity_atr_period: int
+    velocity_smoothing_span: int
+    velocity_entry_threshold: float
+    velocity_entry_persist: int
+    velocity_drawdown_frac: float
+    velocity_stop_atr_mult: float
+    velocity_cooldown_bars: int
+    velocity_trend_ema_period: int
+    velocity_trend_filter_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -114,10 +125,21 @@ def load_settings(env_file: str | Path = ".env") -> AppSettings:
     )
 
     strategy = StrategySettings(
+        strategy_name=_normalize_strategy_name(_get_str("STRATEGY_NAME", "icc")),
         ema_period=_get_int("EMA_PERIOD", 200),
         take_profit_rr=_get_float("TAKE_PROFIT_RR", 1.5),
         stop_loss_type=_get_str("STOP_LOSS_TYPE", "atr").lower(),
         atr_multiplier=_get_float("ATR_MULTIPLIER", 1.5),
+        velocity_lookback=_get_int("VELOCITY_LOOKBACK_K", 4),
+        velocity_atr_period=_get_int("VELOCITY_ATR_PERIOD", 14),
+        velocity_smoothing_span=_get_int("VELOCITY_SMOOTHING_SPAN", 1),
+        velocity_entry_threshold=_get_float("VELOCITY_ENTRY_THRESHOLD", 0.75),
+        velocity_entry_persist=_get_int("VELOCITY_ENTRY_PERSISTENCE_BARS", 2),
+        velocity_drawdown_frac=_get_float("VELOCITY_EXIT_DRAWDOWN_FRACTION", 0.35),
+        velocity_stop_atr_mult=_get_float("VELOCITY_ATR_STOP_MULTIPLIER", 2.0),
+        velocity_cooldown_bars=_get_int("VELOCITY_COOLDOWN_BARS", 0),
+        velocity_trend_ema_period=_get_int("VELOCITY_TREND_EMA_PERIOD", 200),
+        velocity_trend_filter_enabled=_get_bool("VELOCITY_USE_EMA_TREND_FILTER", False),
     )
 
     data = DataSettings(lookback_bars=_get_int("LOOKBACK_BARS", 5000))
@@ -199,6 +221,17 @@ def _get_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean (true/false).")
 
 
+def _normalize_strategy_name(raw_name: str) -> str:
+    normalized = raw_name.strip().lower()
+    aliases = {
+        "icc": "icc",
+        "velocity": "velocity",
+        "momentum-velocity": "velocity",
+        "momentum_velocity": "velocity",
+    }
+    return aliases.get(normalized, normalized)
+
+
 def _validate(settings: AppSettings) -> None:
     errors: list[str] = []
 
@@ -213,6 +246,8 @@ def _validate(settings: AppSettings) -> None:
 
     if settings.strategy.stop_loss_type not in {"atr", "structure"}:
         errors.append("STOP_LOSS_TYPE must be one of: atr, structure.")
+    if settings.strategy.strategy_name not in {"icc", "velocity"}:
+        errors.append("STRATEGY_NAME must be one of: icc, velocity.")
 
     if settings.logging.log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
         errors.append("LOG_LEVEL must be one of: DEBUG, INFO, WARNING, ERROR, CRITICAL.")
@@ -244,6 +279,25 @@ def _validate(settings: AppSettings) -> None:
 
     if settings.strategy.atr_multiplier <= 0:
         errors.append("ATR_MULTIPLIER must be > 0.")
+
+    if settings.strategy.velocity_lookback <= 0:
+        errors.append("VELOCITY_LOOKBACK_K must be > 0 for velocity strategy.")
+    if settings.strategy.velocity_atr_period <= 1:
+        errors.append("VELOCITY_ATR_PERIOD must be > 1 for velocity strategy.")
+    if settings.strategy.velocity_smoothing_span <= 0:
+        errors.append("VELOCITY_SMOOTHING_SPAN must be > 0 for velocity strategy.")
+    if settings.strategy.velocity_entry_threshold <= 0:
+        errors.append("VELOCITY_ENTRY_THRESHOLD must be > 0 for velocity strategy.")
+    if settings.strategy.velocity_entry_persist <= 0:
+        errors.append("VELOCITY_ENTRY_PERSISTENCE_BARS must be > 0 for velocity strategy.")
+    if not (0 < settings.strategy.velocity_drawdown_frac <= 1):
+        errors.append("VELOCITY_EXIT_DRAWDOWN_FRACTION must be in (0, 1] for velocity strategy.")
+    if settings.strategy.velocity_stop_atr_mult <= 0:
+        errors.append("VELOCITY_ATR_STOP_MULTIPLIER must be > 0 for velocity strategy.")
+    if settings.strategy.velocity_cooldown_bars < 0:
+        errors.append("VELOCITY_COOLDOWN_BARS must be >= 0 for velocity strategy.")
+    if settings.strategy.velocity_trend_ema_period <= 1:
+        errors.append("VELOCITY_TREND_EMA_PERIOD must be > 1 for velocity strategy.")
 
     if settings.data.lookback_bars <= 0:
         errors.append("LOOKBACK_BARS must be > 0.")

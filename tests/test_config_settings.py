@@ -20,6 +20,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.trading.symbol, "EURUSD")
         self.assertEqual(settings.trading.timeframe, "M15")
         self.assertEqual(settings.trading.risk_per_trade, 0.5)
+        self.assertEqual(settings.strategy.strategy_name, "icc")
         self.assertTrue(settings.logging.log_to_file)
         self.assertIsNone(settings.mt5.login)
 
@@ -87,6 +88,16 @@ class SettingsTests(unittest.TestCase):
         with patch.dict("os.environ", {"LOG_TO_FILE": "sometimes"}, clear=True):
             with self.assertRaises(ValueError):
                 load_settings(env_file="__missing__.env")
+
+    def test_invalid_strategy_name_raises(self) -> None:
+        with patch.dict("os.environ", {"STRATEGY_NAME": "foo"}, clear=True):
+            with self.assertRaises(ValueError):
+                load_settings(env_file="__missing__.env")
+
+    def test_velocity_strategy_alias_is_normalized(self) -> None:
+        with patch.dict("os.environ", {"STRATEGY_NAME": "momentum-velocity"}, clear=True):
+            settings = load_settings(env_file="__missing__.env")
+        self.assertEqual(settings.strategy.strategy_name, "velocity")
 
 
 if __name__ == "__main__":

@@ -90,6 +90,46 @@ trading-bot/
 
 ---
 
+## Velocity Strategy (Research Mode)
+
+The repo supports a momentum-velocity strategy alongside ICC for backtests.
+
+Velocity definition:
+
+- `velocity_t = ln(close_t / close_{t-k}) / ATR_t`
+- ATR uses Wilder-style smoothing
+- Optional EMA smoothing is applied when `VELOCITY_SMOOTHING_SPAN > 1`
+- Entries require threshold persistence on consecutive closed bars
+- Exits are momentum-fade based (no fixed TP), with an ATR disaster stop
+
+Example `.env` block:
+
+```env
+STRATEGY_NAME=velocity
+VELOCITY_LOOKBACK_K=4
+VELOCITY_ATR_PERIOD=14
+VELOCITY_SMOOTHING_SPAN=1
+VELOCITY_ENTRY_THRESHOLD=0.75
+VELOCITY_ENTRY_PERSISTENCE_BARS=2
+VELOCITY_EXIT_DRAWDOWN_FRACTION=0.35
+VELOCITY_ATR_STOP_MULTIPLIER=2.0
+VELOCITY_COOLDOWN_BARS=0
+VELOCITY_USE_EMA_TREND_FILTER=false
+VELOCITY_TREND_EMA_PERIOD=200
+```
+
+Run examples:
+
+```powershell
+# Use strategy from STRATEGY_NAME
+python scripts/run_backtest.py
+
+# Explicit strategy override
+python scripts/run_backtest.py --strategy velocity
+```
+
+---
+
 ## Local Setup (Windows PowerShell)
 
 ```powershell

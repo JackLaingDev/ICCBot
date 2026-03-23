@@ -11,6 +11,15 @@ from typing import Callable, Literal
 
 import pandas as pd
 
+from src.backtest.filters import (
+    is_entry_aligned_with_htf_bias,
+    is_entry_allowed_by_regime,
+    is_entry_hour_allowed,
+    validate_allowed_directions,
+    validate_entry_regime_filter,
+    validate_htf_bias_by_time,
+    validate_session_hours,
+)
 from src.strategies.icc_strategy import evaluate_icc_v1
 from src.strategies.models import StrategyDecision
 
@@ -53,13 +62,13 @@ def run_backtest(
     """
 
     _validate_backtest_input(dataframe)
-    _validate_allowed_directions(allowed_directions)
-    _validate_session_hours(
+    validate_allowed_directions(allowed_directions)
+    validate_session_hours(
         session_start_hour=session_start_hour,
         session_end_hour=session_end_hour,
     )
-    _validate_htf_bias_by_time(htf_bias_by_time)
-    _validate_entry_regime_filter(
+    validate_htf_bias_by_time(htf_bias_by_time)
+    validate_entry_regime_filter(
         entry_regime_by_time=entry_regime_by_time,
         required_entry_regime=required_entry_regime,
     )
@@ -100,7 +109,7 @@ def run_backtest(
                 progress_callback(index, total_bars)
             continue
         entry_time = ordered.iloc[index]["time"]
-        if not _is_entry_hour_allowed(
+        if not is_entry_hour_allowed(
             entry_time=entry_time,
             session_start_hour=session_start_hour,
             session_end_hour=session_end_hour,
@@ -109,7 +118,7 @@ def run_backtest(
             if progress_callback is not None:
                 progress_callback(index, total_bars)
             continue
-        if not _is_entry_aligned_with_htf_bias(
+        if not is_entry_aligned_with_htf_bias(
             entry_time=entry_time,
             signal=decision.signal,
             htf_bias_by_time=htf_bias_by_time,
@@ -118,7 +127,7 @@ def run_backtest(
             if progress_callback is not None:
                 progress_callback(index, total_bars)
             continue
-        if not _is_entry_allowed_by_regime(
+        if not is_entry_allowed_by_regime(
             entry_time=entry_time,
             entry_regime_by_time=entry_regime_by_time,
             required_entry_regime=required_entry_regime,
@@ -236,128 +245,3 @@ def _validate_backtest_input(dataframe: pd.DataFrame) -> None:
     missing = required.difference(dataframe.columns)
     if missing:
         raise ValueError(f"dataframe is missing required columns: {sorted(missing)}")
-
-
-def _validate_allowed_directions(allowed_directions: set[str] | None) -> None:
-    if allowed_directions is None:
-        return
-    invalid = set(allowed_directions).difference({"BUY", "SELL"})
-    if invalid:
-        raise ValueError(f"allowed_directions contains invalid values: {sorted(invalid)}")
-
-
-def _validate_session_hours(
-    *,
-    session_start_hour: int | None,
-    session_end_hour: int | None,
-) -> None:
-    if (session_start_hour is None) != (session_end_hour is None):
-        raise ValueError("session_start_hour and session_end_hour must be set together")
-    if session_start_hour is None and session_end_hour is None:
-        return
-    if not (0 <= session_start_hour <= 23):
-        raise ValueError("session_start_hour must be between 0 and 23")
-    if not (0 <= session_end_hour <= 23):
-        raise ValueError("session_end_hour must be between 0 and 23")
-    if session_start_hour == session_end_hour:
-        raise ValueError(
-            "session_start_hour and session_end_hour must differ; "
-            "omit both to allow all hours"
-        )
-
-
-def _is_entry_hour_allowed(
-    *,
-    entry_time: object,
-    session_start_hour: int | None,
-    session_end_hour: int | None,
-) -> bool:
-    if session_start_hour is None and session_end_hour is None:
-        return True
-
-    hour = _to_utc_hour(entry_time)
-    if session_start_hour < session_end_hour:
-        return session_start_hour <= hour < session_end_hour
-    return hour >= session_start_hour or hour < session_end_hour
-
-
-def _is_entry_aligned_with_htf_bias(
-    *,
-    entry_time: object,
-    signal: str,
-    htf_bias_by_time: dict[object, str] | None,
-) -> bool:
-    if htf_bias_by_time is None:
-        return True
-
-    bias = htf_bias_by_time.get(_to_utc_timestamp(entry_time))
-    if bias is None:
-        return False
-
-    if signal == "BUY":
-        return bias == "BULLISH"
-    if signal == "SELL":
-        return bias == "BEARISH"
-    return False
-
-
-def _validate_htf_bias_by_time(htf_bias_by_time: dict[object, str] | None) -> None:
-    if htf_bias_by_time is None:
-        return
-    valid = {"BULLISH", "BEARISH", "NEUTRAL"}
-    for key, value in htf_bias_by_time.items():
-        _to_utc_timestamp(key)
-        if value not in valid:
-            raise ValueError(f"htf_bias_by_time contains invalid value: {value!r}")
-
-
-def _validate_entry_regime_filter(
-    *,
-    entry_regime_by_time: dict[object, str] | None,
-    required_entry_regime: str | None,
-) -> None:
-    if required_entry_regime is None:
-        return
-    if required_entry_regime not in {"high_vol", "low_vol"}:
-        raise ValueError("required_entry_regime must be one of: high_vol, low_vol")
-    if entry_regime_by_time is None:
-        raise ValueError("entry_regime_by_time must be provided when required_entry_regime is set")
-    valid = {"high_vol", "low_vol"}
-    for key, value in entry_regime_by_time.items():
-        _to_utc_timestamp(key)
-        if value not in valid:
-            raise ValueError(f"entry_regime_by_time contains invalid value: {value!r}")
-
-
-def _is_entry_allowed_by_regime(
-    *,
-    entry_time: object,
-    entry_regime_by_time: dict[object, str] | None,
-    required_entry_regime: str | None,
-) -> bool:
-    if required_entry_regime is None:
-        return True
-    if entry_regime_by_time is None:
-        return False
-    regime = entry_regime_by_time.get(_to_utc_timestamp(entry_time))
-    return regime == required_entry_regime
-
-
-def _to_utc_hour(entry_time: object) -> int:
-    """Return hour-of-day in UTC from entry_time.
-
-    Naive datetimes are treated as UTC by convention.
-    """
-    timestamp = pd.Timestamp(entry_time)
-    if timestamp.tzinfo is None:
-        timestamp = timestamp.tz_localize("UTC")
-    else:
-        timestamp = timestamp.tz_convert("UTC")
-    return int(timestamp.hour)
-
-
-def _to_utc_timestamp(value: object) -> pd.Timestamp:
-    timestamp = pd.Timestamp(value)
-    if timestamp.tzinfo is None:
-        return timestamp.tz_localize("UTC")
-    return timestamp.tz_convert("UTC")
