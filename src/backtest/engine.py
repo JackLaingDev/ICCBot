@@ -43,6 +43,8 @@ def run_backtest(
     session_start_hour: int | None = None,
     session_end_hour: int | None = None,
     htf_bias_by_time: dict[object, str] | None = None,
+    entry_regime_by_time: dict[object, str] | None = None,
+    required_entry_regime: str | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[BacktestTrade]:
     """Run a deterministic one-trade-at-a-time backtest over OHLCV candles.
@@ -57,6 +59,10 @@ def run_backtest(
         session_end_hour=session_end_hour,
     )
     _validate_htf_bias_by_time(htf_bias_by_time)
+    _validate_entry_regime_filter(
+        entry_regime_by_time=entry_regime_by_time,
+        required_entry_regime=required_entry_regime,
+    )
     ordered = dataframe.sort_values("time").reset_index(drop=True)
     trades: list[BacktestTrade] = []
     total_bars = len(ordered)
@@ -107,6 +113,15 @@ def run_backtest(
             entry_time=entry_time,
             signal=decision.signal,
             htf_bias_by_time=htf_bias_by_time,
+        ):
+            index += 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
+            continue
+        if not _is_entry_allowed_by_regime(
+            entry_time=entry_time,
+            entry_regime_by_time=entry_regime_by_time,
+            required_entry_regime=required_entry_regime,
         ):
             index += 1
             if progress_callback is not None:
@@ -294,6 +309,38 @@ def _validate_htf_bias_by_time(htf_bias_by_time: dict[object, str] | None) -> No
         _to_utc_timestamp(key)
         if value not in valid:
             raise ValueError(f"htf_bias_by_time contains invalid value: {value!r}")
+
+
+def _validate_entry_regime_filter(
+    *,
+    entry_regime_by_time: dict[object, str] | None,
+    required_entry_regime: str | None,
+) -> None:
+    if required_entry_regime is None:
+        return
+    if required_entry_regime not in {"high_vol", "low_vol"}:
+        raise ValueError("required_entry_regime must be one of: high_vol, low_vol")
+    if entry_regime_by_time is None:
+        raise ValueError("entry_regime_by_time must be provided when required_entry_regime is set")
+    valid = {"high_vol", "low_vol"}
+    for key, value in entry_regime_by_time.items():
+        _to_utc_timestamp(key)
+        if value not in valid:
+            raise ValueError(f"entry_regime_by_time contains invalid value: {value!r}")
+
+
+def _is_entry_allowed_by_regime(
+    *,
+    entry_time: object,
+    entry_regime_by_time: dict[object, str] | None,
+    required_entry_regime: str | None,
+) -> bool:
+    if required_entry_regime is None:
+        return True
+    if entry_regime_by_time is None:
+        return False
+    regime = entry_regime_by_time.get(_to_utc_timestamp(entry_time))
+    return regime == required_entry_regime
 
 
 def _to_utc_hour(entry_time: object) -> int:

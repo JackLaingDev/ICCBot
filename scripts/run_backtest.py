@@ -33,7 +33,10 @@ def main() -> int:
     session_end_hour = args.session_end_hour
     htf_bias_mode = args.htf_bias
     date_split_mode = args.date_split
+    vol_filter_mode = args.vol_filter
     htf_bias_by_time: dict[pd.Timestamp, str] | None = None
+    entry_regime_by_time: dict[pd.Timestamp, str] | None = None
+    required_entry_regime: str | None = None
     progress_state = {"last_percent": -1}
     _log(
         f"Prepared run config: symbol={symbol}, timeframe={timeframe}, "
@@ -44,6 +47,7 @@ def main() -> int:
     else:
         _log(f"Session filter UTC: {session_start_hour:02d}-{session_end_hour:02d}")
     _log(f"HTF bias filter: {htf_bias_mode}")
+    _log(f"Volatility regime filter: {vol_filter_mode}")
     _log(f"Date split mode: {date_split_mode}")
 
     try:
@@ -59,6 +63,9 @@ def main() -> int:
             count=settings.data.lookback_bars,
         )
         _log(f"Data fetch complete (rows={len(dataframe)})")
+        entry_regime_by_time = _build_volatility_regime_by_time(dataframe)
+        if vol_filter_mode == "high-only":
+            required_entry_regime = "high_vol"
 
         if htf_bias_mode == "h1-ema200":
             _log("Fetching H1 data for HTF bias...")
@@ -87,6 +94,8 @@ def main() -> int:
             session_start_hour=session_start_hour,
             session_end_hour=session_end_hour,
             htf_bias_by_time=htf_bias_by_time,
+            entry_regime_by_time=entry_regime_by_time,
+            required_entry_regime=required_entry_regime,
             progress_callback=lambda done, total: _print_progress(
                 done=done,
                 total=total,
@@ -110,6 +119,7 @@ def main() -> int:
             )
         )
         print(f"HTF bias filter: {htf_bias_mode}")
+        print(f"Volatility regime filter: {vol_filter_mode}")
         print(f"Symbol: {symbol}")
         print(f"Timeframe: {timeframe}")
         print(f"Rows fetched: {len(dataframe)}")
@@ -144,7 +154,7 @@ def main() -> int:
         print("Monthly breakdown (UTC entry month):")
         _print_monthly_breakdown(trades)
         print("Regime breakdown (M15 range median split):")
-        _print_regime_breakdown(trades, _build_volatility_regime_by_time(dataframe))
+        _print_regime_breakdown(trades, entry_regime_by_time or {})
         print(f"Average trade duration (bars): {metrics.average_trade_duration_bars:.2f}")
         print("Top 5 winning trades:")
         _print_trade_list(_top_winning_trades(trades, limit=5))
@@ -169,6 +179,8 @@ def main() -> int:
                     session_start_hour=session_start_hour,
                     session_end_hour=session_end_hour,
                     htf_bias_by_time=htf_bias_by_time,
+                    entry_regime_by_time=entry_regime_by_time,
+                    required_entry_regime=required_entry_regime,
                     progress_callback=None,
                 )
                 split_metrics = calculate_metrics(split_trades)
@@ -244,6 +256,12 @@ def _parse_args() -> argparse.Namespace:
         choices=("none", "halves"),
         default="none",
         help="Optional text-only robustness split reporting: none or early/later halves.",
+    )
+    parser.add_argument(
+        "--vol-filter",
+        choices=("none", "high-only"),
+        default="none",
+        help="Optional entry filter by volatility regime: none or high-only.",
     )
     return parser.parse_args()
 
@@ -391,7 +409,8 @@ def _build_volatility_regime_by_time(dataframe: pd.DataFrame) -> dict[pd.Timesta
 
     Assumptions:
     - Range is `high - low` in raw price units.
-    - Threshold is the median range over the current fetched dataset.
+    - Threshold at each bar uses only historical ranges up to prior bar
+      (expanding median) to avoid lookahead.
     - Bars with range equal to median are treated as `low_vol`.
     """
     working = dataframe[["time", "high", "low"]].copy()
@@ -403,9 +422,10 @@ def _build_volatility_regime_by_time(dataframe: pd.DataFrame) -> dict[pd.Timesta
         return {}
 
     working["range"] = working["high"] - working["low"]
-    threshold = float(working["range"].median())
+    working["threshold"] = working["range"].expanding(min_periods=1).median().shift(1)
+    working["threshold"] = working["threshold"].fillna(working["range"])
     working["regime"] = "low_vol"
-    working.loc[working["range"] > threshold, "regime"] = "high_vol"
+    working.loc[working["range"] > working["threshold"], "regime"] = "high_vol"
     regime_series = working.set_index("time")["regime"]
     return regime_series.to_dict()
 
