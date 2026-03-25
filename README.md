@@ -119,3 +119,9 @@ Run one live ICC signal check (no order execution):
 ```powershell
 python scripts/run_signal.py
 ```
+
+Run local 15-minute automation loop (weekdays, 07:00-12:00 UTC):
+
+```powershell
+python scripts/run_signal_loop.py
+```
