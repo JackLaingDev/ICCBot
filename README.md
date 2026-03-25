@@ -113,3 +113,15 @@ Run a basic import check:
 python -c "import src, src.app.main, src.config.settings; print('import-ok')"
 python -m unittest tests/test_smoke_imports.py -v
 ```
+
+Run one live ICC signal check (no order execution):
+
+```powershell
+python scripts/run_signal.py
+```
+
+Run local 15-minute automation loop (weekdays, 07:00-12:00 UTC):
+
+```powershell
+python scripts/run_signal_loop.py
+```
