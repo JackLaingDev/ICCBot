@@ -19,6 +19,7 @@ import pandas as pd
 from src.config.settings import load_settings
 from src.data.market_data import fetch_market_data
 from src.data.mt5_client import MT5Client
+from src.risk.manager import SignalGuardInput, evaluate_signal_guardrails
 from src.strategies.icc_strategy import evaluate_icc_v1
 from src.strategies.models import StrategyDecision
 
@@ -28,6 +29,8 @@ SESSION_START_HOUR_UTC = 7
 SESSION_END_HOUR_UTC = 12
 HTF_EMA_PERIOD = 200
 M15_MINUTES = 15
+STALE_AFTER_MINUTES = 30
+MAX_SIGNALS_PER_DAY: int | None = None
 
 
 @dataclass(frozen=True)
@@ -68,16 +71,10 @@ def main() -> int:
             ema_period=settings.strategy.ema_period,
             take_profit_rr=settings.strategy.take_profit_rr,
         )
-        if _is_duplicate_candle(row["candle_timestamp_utc"]):
-            duplicate_row = dict(row)
-            duplicate_row["signal"] = "NONE"
-            duplicate_row["reason"] = "duplicate_candle_already_logged"
-            duplicate_row["duplicate_guard"] = "blocked"
-            _print_result(duplicate_row)
-            return 0
-
-        _append_log_row(row)
         _print_result(row)
+        if row["duplicate_guard"] == "blocked":
+            return 0
+        _append_log_row(row)
         return 0
     finally:
         if client.is_connected():
@@ -96,9 +93,39 @@ def _evaluate_latest_closed_signal(
     base = _base_output(evaluation_time=evaluation_time)
 
     if m15_df.empty:
-        return _finalize(base, reason="missing_m15_data")
+        guard_result = evaluate_signal_guardrails(
+            SignalGuardInput(
+                evaluation_time_utc=evaluation_time,
+                candle_time_utc=None,
+                has_m15_data=False,
+                has_h1_data=not h1_df.empty,
+                duplicate_candle=False,
+                session_start_hour_utc=SESSION_START_HOUR_UTC,
+                session_end_hour_utc=SESSION_END_HOUR_UTC,
+                candle_minutes=M15_MINUTES,
+                stale_after_minutes=STALE_AFTER_MINUTES,
+                max_signals_per_day=MAX_SIGNALS_PER_DAY,
+                signals_today=0,
+            )
+        )
+        return _finalize(base, reason=guard_result.reason, duplicate_guard=guard_result.duplicate)
     if h1_df.empty:
-        return _finalize(base, reason="missing_h1_data")
+        guard_result = evaluate_signal_guardrails(
+            SignalGuardInput(
+                evaluation_time_utc=evaluation_time,
+                candle_time_utc=None,
+                has_m15_data=True,
+                has_h1_data=False,
+                duplicate_candle=False,
+                session_start_hour_utc=SESSION_START_HOUR_UTC,
+                session_end_hour_utc=SESSION_END_HOUR_UTC,
+                candle_minutes=M15_MINUTES,
+                stale_after_minutes=STALE_AFTER_MINUTES,
+                max_signals_per_day=MAX_SIGNALS_PER_DAY,
+                signals_today=0,
+            )
+        )
+        return _finalize(base, reason=guard_result.reason, duplicate_guard=guard_result.duplicate)
     if len(m15_df) < 2:
         return _finalize(base, reason="not_enough_m15_rows")
 
@@ -111,18 +138,34 @@ def _evaluate_latest_closed_signal(
     candle_time = pd.Timestamp(closed_candle["time"])
     base["candle_timestamp_utc"] = candle_time.isoformat()
 
-    if _is_future_candle(candle_time=candle_time, evaluation_time=evaluation_time):
-        return _finalize(base, reason="future_candle_timestamp")
-
-    if _is_stale_closed_candle(candle_time=candle_time, evaluation_time=evaluation_time):
-        return _finalize(base, reason="stale_closed_candle")
-
-    session_ok = _is_in_session(candle_time)
-    if not session_ok:
+    duplicate = _is_duplicate_candle(base["candle_timestamp_utc"])
+    signals_today = _count_logged_sell_signals_for_day(base["candle_timestamp_utc"])
+    guard_result = evaluate_signal_guardrails(
+        SignalGuardInput(
+            evaluation_time_utc=evaluation_time,
+            candle_time_utc=candle_time,
+            has_m15_data=not m15_df.empty,
+            has_h1_data=not h1_df.empty,
+            duplicate_candle=duplicate,
+            session_start_hour_utc=SESSION_START_HOUR_UTC,
+            session_end_hour_utc=SESSION_END_HOUR_UTC,
+            candle_minutes=M15_MINUTES,
+            stale_after_minutes=STALE_AFTER_MINUTES,
+            max_signals_per_day=MAX_SIGNALS_PER_DAY,
+            signals_today=signals_today,
+        )
+    )
+    if not guard_result.allowed:
         return _finalize(
             base,
-            reason="blocked_by_session",
-            filters=FilterStatus("blocked", "blocked", "blocked", "blocked"),
+            reason=guard_result.reason,
+            filters=FilterStatus(
+                guard_result.session,
+                "blocked",
+                "blocked",
+                "blocked",
+            ),
+            duplicate_guard=guard_result.duplicate,
         )
 
     htf_bias_by_time = _build_ema_bias_by_time(
@@ -149,11 +192,12 @@ def _evaluate_latest_closed_signal(
             base,
             reason=f"strategy_input_error:{exc}",
             filters=FilterStatus(
-                "passed",
+                guard_result.session,
                 "blocked",
                 "passed" if htf_ok else "blocked",
                 "passed" if regime_ok else "blocked",
             ),
+            duplicate_guard=guard_result.duplicate,
         )
 
     direction_ok = decision.signal == "SELL"
@@ -162,32 +206,41 @@ def _evaluate_latest_closed_signal(
             base,
             reason=decision.reason or "strategy_none",
             filters=FilterStatus(
-                "passed",
+                guard_result.session,
                 "blocked",
                 "passed" if htf_ok else "blocked",
                 "passed" if regime_ok else "blocked",
             ),
+            duplicate_guard=guard_result.duplicate,
         )
     if not htf_ok:
         return _finalize(
             base,
             reason="blocked_by_htf_bias",
             decision=decision,
-            filters=FilterStatus("passed", "passed", "blocked", "passed" if regime_ok else "blocked"),
+            filters=FilterStatus(
+                guard_result.session,
+                "passed",
+                "blocked",
+                "passed" if regime_ok else "blocked",
+            ),
+            duplicate_guard=guard_result.duplicate,
         )
     if not regime_ok:
         return _finalize(
             base,
             reason="blocked_by_volatility_regime",
             decision=decision,
-            filters=FilterStatus("passed", "passed", "passed", "blocked"),
+            filters=FilterStatus(guard_result.session, "passed", "passed", "blocked"),
+            duplicate_guard=guard_result.duplicate,
         )
 
     return _finalize(
         base,
         reason=decision.reason or "sell_setup",
         decision=decision,
-        filters=FilterStatus("passed", "passed", "passed", "passed"),
+        filters=FilterStatus(guard_result.session, "passed", "passed", "passed"),
+        duplicate_guard=guard_result.duplicate,
     )
 
 
@@ -213,9 +266,11 @@ def _finalize(
     reason: str,
     decision: StrategyDecision | None = None,
     filters: FilterStatus | None = None,
+    duplicate_guard: Literal["passed", "blocked"] = "passed",
 ) -> dict[str, str]:
     row = dict(base)
     row["reason"] = reason
+    row["duplicate_guard"] = duplicate_guard
     if filters is not None:
         row["filter_session"] = filters.session
         row["filter_direction"] = filters.direction
@@ -226,20 +281,6 @@ def _finalize(
         row["stop_loss"] = "" if decision.stop_loss is None else f"{decision.stop_loss:.5f}"
         row["take_profit"] = "" if decision.take_profit is None else f"{decision.take_profit:.5f}"
     return row
-
-
-def _is_stale_closed_candle(*, candle_time: pd.Timestamp, evaluation_time: pd.Timestamp) -> bool:
-    close_time = candle_time + pd.Timedelta(minutes=M15_MINUTES)
-    return (evaluation_time - close_time) > pd.Timedelta(minutes=30)
-
-
-def _is_future_candle(*, candle_time: pd.Timestamp, evaluation_time: pd.Timestamp) -> bool:
-    return _to_utc_timestamp(candle_time) > _to_utc_timestamp(evaluation_time)
-
-
-def _is_in_session(candle_time: pd.Timestamp) -> bool:
-    hour = int(_to_utc_timestamp(candle_time).hour)
-    return SESSION_START_HOUR_UTC <= hour < SESSION_END_HOUR_UTC
 
 
 def _to_utc_timestamp(value: object) -> pd.Timestamp:
@@ -323,6 +364,24 @@ def _is_duplicate_candle(candle_timestamp: str) -> bool:
     if existing.empty or "candle_timestamp_utc" not in existing.columns:
         return False
     return bool((existing["candle_timestamp_utc"] == candle_timestamp).any())
+
+
+def _count_logged_sell_signals_for_day(candle_timestamp: str) -> int:
+    if not candle_timestamp:
+        return 0
+    if not SIGNAL_LOG_PATH.exists():
+        return 0
+    existing = pd.read_csv(SIGNAL_LOG_PATH)
+    if existing.empty:
+        return 0
+    if "candle_timestamp_utc" not in existing.columns or "signal" not in existing.columns:
+        return 0
+
+    candle_day = _to_utc_timestamp(candle_timestamp).strftime("%Y-%m-%d")
+    candle_series = pd.to_datetime(existing["candle_timestamp_utc"], utc=True, errors="coerce")
+    day_mask = candle_series.dt.strftime("%Y-%m-%d") == candle_day
+    sell_mask = existing["signal"] == "SELL"
+    return int((day_mask & sell_mask).sum())
 
 
 def _append_log_row(row: dict[str, str]) -> None:

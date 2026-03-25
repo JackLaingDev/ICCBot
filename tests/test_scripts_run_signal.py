@@ -32,46 +32,6 @@ class RunSignalScriptTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.module = _load_run_signal_module()
 
-    def test_is_in_session_utc_boundaries(self) -> None:
-        self.assertFalse(self.module._is_in_session(pd.Timestamp("2026-01-01 06:59:00+00:00")))
-        self.assertTrue(self.module._is_in_session(pd.Timestamp("2026-01-01 07:00:00+00:00")))
-        self.assertTrue(self.module._is_in_session(pd.Timestamp("2026-01-01 11:59:00+00:00")))
-        self.assertFalse(self.module._is_in_session(pd.Timestamp("2026-01-01 12:00:00+00:00")))
-
-    def test_is_stale_closed_candle(self) -> None:
-        evaluation_time = pd.Timestamp("2026-01-01 11:00:00+00:00")
-        fresh_candle = pd.Timestamp("2026-01-01 10:20:00+00:00")
-        stale_candle = pd.Timestamp("2026-01-01 09:00:00+00:00")
-        self.assertFalse(
-            self.module._is_stale_closed_candle(
-                candle_time=fresh_candle,
-                evaluation_time=evaluation_time,
-            )
-        )
-        self.assertTrue(
-            self.module._is_stale_closed_candle(
-                candle_time=stale_candle,
-                evaluation_time=evaluation_time,
-            )
-        )
-
-    def test_is_future_candle(self) -> None:
-        evaluation_time = pd.Timestamp("2026-01-01 11:00:00+00:00")
-        future_candle = pd.Timestamp("2026-01-01 11:15:00+00:00")
-        past_candle = pd.Timestamp("2026-01-01 10:45:00+00:00")
-        self.assertTrue(
-            self.module._is_future_candle(
-                candle_time=future_candle,
-                evaluation_time=evaluation_time,
-            )
-        )
-        self.assertFalse(
-            self.module._is_future_candle(
-                candle_time=past_candle,
-                evaluation_time=evaluation_time,
-            )
-        )
-
     def test_build_ema_bias_h1_no_lookahead_boundary(self) -> None:
         lower = pd.DataFrame(
             {
@@ -212,6 +172,38 @@ class RunSignalScriptTests(unittest.TestCase):
         )
         self.assertEqual(result["signal"], "NONE")
         self.assertEqual(result["reason"], "future_candle_timestamp")
+
+    def test_evaluate_missing_h1_data_uses_guardrail_reason(self) -> None:
+        evaluation_time = pd.Timestamp("2026-01-01 11:00:00+00:00")
+        m15 = pd.DataFrame(
+            [
+                {
+                    "time": pd.Timestamp("2026-01-01 10:30:00+00:00"),
+                    "open": 1.10,
+                    "high": 1.11,
+                    "low": 1.09,
+                    "close": 1.10,
+                    "volume": 100,
+                },
+                {
+                    "time": pd.Timestamp("2026-01-01 10:45:00+00:00"),
+                    "open": 1.10,
+                    "high": 1.11,
+                    "low": 1.09,
+                    "close": 1.10,
+                    "volume": 110,
+                },
+            ]
+        )
+        result = self.module._evaluate_latest_closed_signal(
+            evaluation_time=evaluation_time,
+            m15_df=m15,
+            h1_df=pd.DataFrame(),
+            ema_period=200,
+            take_profit_rr=1.5,
+        )
+        self.assertEqual(result["signal"], "NONE")
+        self.assertEqual(result["reason"], "missing_required_data")
 
 
 if __name__ == "__main__":
