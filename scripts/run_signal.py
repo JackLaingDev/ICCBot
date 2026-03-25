@@ -92,13 +92,15 @@ def _evaluate_latest_closed_signal(
     """Evaluate frozen ICC setup on the latest fully closed M15 candle."""
     base = _base_output(evaluation_time=evaluation_time)
 
-    if m15_df.empty:
+    has_m15_data = not m15_df.empty
+    has_h1_data = not h1_df.empty
+    if (not has_m15_data) or (not has_h1_data):
         guard_result = evaluate_signal_guardrails(
             SignalGuardInput(
                 evaluation_time_utc=evaluation_time,
                 candle_time_utc=None,
-                has_m15_data=False,
-                has_h1_data=not h1_df.empty,
+                has_m15_data=has_m15_data,
+                has_h1_data=has_h1_data,
                 duplicate_candle=False,
                 session_start_hour_utc=SESSION_START_HOUR_UTC,
                 session_end_hour_utc=SESSION_END_HOUR_UTC,
@@ -109,25 +111,9 @@ def _evaluate_latest_closed_signal(
             )
         )
         return _finalize(base, reason=guard_result.reason, duplicate_guard=guard_result.duplicate)
-    if h1_df.empty:
-        guard_result = evaluate_signal_guardrails(
-            SignalGuardInput(
-                evaluation_time_utc=evaluation_time,
-                candle_time_utc=None,
-                has_m15_data=True,
-                has_h1_data=False,
-                duplicate_candle=False,
-                session_start_hour_utc=SESSION_START_HOUR_UTC,
-                session_end_hour_utc=SESSION_END_HOUR_UTC,
-                candle_minutes=M15_MINUTES,
-                stale_after_minutes=STALE_AFTER_MINUTES,
-                max_signals_per_day=MAX_SIGNALS_PER_DAY,
-                signals_today=0,
-            )
-        )
-        return _finalize(base, reason=guard_result.reason, duplicate_guard=guard_result.duplicate)
+
     if len(m15_df) < 2:
-        return _finalize(base, reason="not_enough_m15_rows")
+        return _finalize(base, reason="missing_closed_candle")
 
     ordered = m15_df.sort_values("time").reset_index(drop=True).copy()
     ordered["time"] = pd.to_datetime(ordered["time"], utc=True)

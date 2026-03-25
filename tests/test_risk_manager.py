@@ -28,7 +28,13 @@ class RiskManagerTests(unittest.TestCase):
         input_data = SignalGuardInput(**{**input_data.__dict__, "has_h1_data": False})
         result = evaluate_signal_guardrails(input_data)
         self.assertFalse(result.allowed)
-        self.assertEqual(result.reason, "missing_required_data")
+        self.assertEqual(result.reason, "missing_h1_data")
+
+    def test_missing_m15_data_blocks(self) -> None:
+        input_data = SignalGuardInput(**{**self._base_input().__dict__, "has_m15_data": False})
+        result = evaluate_signal_guardrails(input_data)
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason, "missing_m15_data")
 
     def test_future_candle_blocks(self) -> None:
         input_data = SignalGuardInput(

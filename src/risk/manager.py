@@ -52,9 +52,15 @@ def evaluate_signal_guardrails(input_data: SignalGuardInput) -> SignalGuardResul
 
     has_data = bool(input_data.has_m15_data and input_data.has_h1_data)
     if not has_data:
+        if not input_data.has_m15_data:
+            reason = "missing_m15_data"
+        elif not input_data.has_h1_data:
+            reason = "missing_h1_data"
+        else:
+            reason = "missing_required_data"
         return SignalGuardResult(
             allowed=False,
-            reason="missing_required_data",
+            reason=reason,
             closed_candle="blocked",
             session="blocked",
             data_freshness="blocked",

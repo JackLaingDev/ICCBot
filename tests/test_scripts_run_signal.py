@@ -203,7 +203,7 @@ class RunSignalScriptTests(unittest.TestCase):
             take_profit_rr=1.5,
         )
         self.assertEqual(result["signal"], "NONE")
-        self.assertEqual(result["reason"], "missing_required_data")
+        self.assertEqual(result["reason"], "missing_h1_data")
 
 
 if __name__ == "__main__":
