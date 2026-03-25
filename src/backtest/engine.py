@@ -63,7 +63,9 @@ def run_backtest(
         entry_regime_by_time=entry_regime_by_time,
         required_entry_regime=required_entry_regime,
     )
-    ordered = dataframe.sort_values("time").reset_index(drop=True)
+    ordered = dataframe.sort_values("time").reset_index(drop=True).copy()
+    for column_name in ("open", "high", "low", "close", "volume"):
+        ordered[column_name] = pd.to_numeric(ordered[column_name], errors="raise")
     trades: list[BacktestTrade] = []
     total_bars = len(ordered)
 
@@ -72,6 +74,34 @@ def run_backtest(
         progress_callback(0, total_bars)
     while index < len(ordered):
         current_index = index
+        entry_time = ordered.iloc[index]["time"]
+        if not _is_entry_hour_allowed(
+            entry_time=entry_time,
+            session_start_hour=session_start_hour,
+            session_end_hour=session_end_hour,
+        ):
+            index += 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
+            continue
+        if not _is_entry_allowed_by_regime(
+            entry_time=entry_time,
+            entry_regime_by_time=entry_regime_by_time,
+            required_entry_regime=required_entry_regime,
+        ):
+            index += 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
+            continue
+        if not _can_any_allowed_direction_pass_htf(
+            entry_time=entry_time,
+            allowed_directions=allowed_directions,
+            htf_bias_by_time=htf_bias_by_time,
+        ):
+            index += 1
+            if progress_callback is not None:
+                progress_callback(index, total_bars)
+            continue
         window = ordered.iloc[: index + 1]
         try:
             decision = evaluate_icc_v1(
@@ -79,6 +109,7 @@ def run_backtest(
                 ema_period=ema_period,
                 pullback_lookback=pullback_lookback,
                 take_profit_rr=take_profit_rr,
+                validate_inputs=False,
             )
         except ValueError as exc:
             # Warm-up period: strategy may need more rows before evaluation is possible.
@@ -99,29 +130,10 @@ def run_backtest(
             if progress_callback is not None:
                 progress_callback(index, total_bars)
             continue
-        entry_time = ordered.iloc[index]["time"]
-        if not _is_entry_hour_allowed(
-            entry_time=entry_time,
-            session_start_hour=session_start_hour,
-            session_end_hour=session_end_hour,
-        ):
-            index += 1
-            if progress_callback is not None:
-                progress_callback(index, total_bars)
-            continue
         if not _is_entry_aligned_with_htf_bias(
             entry_time=entry_time,
             signal=decision.signal,
             htf_bias_by_time=htf_bias_by_time,
-        ):
-            index += 1
-            if progress_callback is not None:
-                progress_callback(index, total_bars)
-            continue
-        if not _is_entry_allowed_by_regime(
-            entry_time=entry_time,
-            entry_regime_by_time=entry_regime_by_time,
-            required_entry_regime=required_entry_regime,
         ):
             index += 1
             if progress_callback is not None:
@@ -298,6 +310,27 @@ def _is_entry_aligned_with_htf_bias(
         return bias == "BULLISH"
     if signal == "SELL":
         return bias == "BEARISH"
+    return False
+
+
+def _can_any_allowed_direction_pass_htf(
+    *,
+    entry_time: object,
+    allowed_directions: set[str] | None,
+    htf_bias_by_time: dict[object, str] | None,
+) -> bool:
+    """Fast pre-check: skip strategy eval when HTF gate cannot pass any direction."""
+    if htf_bias_by_time is None:
+        return True
+    bias = htf_bias_by_time.get(_to_utc_timestamp(entry_time))
+    if bias is None:
+        return False
+
+    candidate_directions = allowed_directions or {"BUY", "SELL"}
+    if bias == "BULLISH":
+        return "BUY" in candidate_directions
+    if bias == "BEARISH":
+        return "SELL" in candidate_directions
     return False
 
 
