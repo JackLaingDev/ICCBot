@@ -55,6 +55,23 @@ class RunSignalScriptTests(unittest.TestCase):
             )
         )
 
+    def test_is_future_candle(self) -> None:
+        evaluation_time = pd.Timestamp("2026-01-01 11:00:00+00:00")
+        future_candle = pd.Timestamp("2026-01-01 11:15:00+00:00")
+        past_candle = pd.Timestamp("2026-01-01 10:45:00+00:00")
+        self.assertTrue(
+            self.module._is_future_candle(
+                candle_time=future_candle,
+                evaluation_time=evaluation_time,
+            )
+        )
+        self.assertFalse(
+            self.module._is_future_candle(
+                candle_time=past_candle,
+                evaluation_time=evaluation_time,
+            )
+        )
+
     def test_build_ema_bias_h1_no_lookahead_boundary(self) -> None:
         lower = pd.DataFrame(
             {
@@ -149,6 +166,52 @@ class RunSignalScriptTests(unittest.TestCase):
             )
 
         self.assertEqual(result["candle_timestamp_utc"], "2026-01-01T10:45:00+00:00")
+
+    def test_evaluate_blocks_future_candle_timestamp(self) -> None:
+        evaluation_time = pd.Timestamp("2026-01-01 11:00:00+00:00")
+        m15 = pd.DataFrame(
+            [
+                {
+                    "time": pd.Timestamp("2026-01-01 10:45:00+00:00"),
+                    "open": 1.10,
+                    "high": 1.11,
+                    "low": 1.09,
+                    "close": 1.10,
+                    "volume": 100,
+                },
+                {
+                    "time": pd.Timestamp("2026-01-01 11:15:00+00:00"),
+                    "open": 1.10,
+                    "high": 1.11,
+                    "low": 1.09,
+                    "close": 1.10,
+                    "volume": 110,
+                },
+                {
+                    "time": pd.Timestamp("2026-01-01 11:30:00+00:00"),
+                    "open": 1.10,
+                    "high": 1.11,
+                    "low": 1.09,
+                    "close": 1.10,
+                    "volume": 120,
+                },
+            ]
+        )
+        h1 = pd.DataFrame(
+            [
+                {"time": pd.Timestamp("2026-01-01 09:00:00+00:00"), "close": 1.2},
+                {"time": pd.Timestamp("2026-01-01 10:00:00+00:00"), "close": 1.1},
+            ]
+        )
+        result = self.module._evaluate_latest_closed_signal(
+            evaluation_time=evaluation_time,
+            m15_df=m15,
+            h1_df=h1,
+            ema_period=200,
+            take_profit_rr=1.5,
+        )
+        self.assertEqual(result["signal"], "NONE")
+        self.assertEqual(result["reason"], "future_candle_timestamp")
 
 
 if __name__ == "__main__":

@@ -111,6 +111,9 @@ def _evaluate_latest_closed_signal(
     candle_time = pd.Timestamp(closed_candle["time"])
     base["candle_timestamp_utc"] = candle_time.isoformat()
 
+    if _is_future_candle(candle_time=candle_time, evaluation_time=evaluation_time):
+        return _finalize(base, reason="future_candle_timestamp")
+
     if _is_stale_closed_candle(candle_time=candle_time, evaluation_time=evaluation_time):
         return _finalize(base, reason="stale_closed_candle")
 
@@ -228,6 +231,10 @@ def _finalize(
 def _is_stale_closed_candle(*, candle_time: pd.Timestamp, evaluation_time: pd.Timestamp) -> bool:
     close_time = candle_time + pd.Timedelta(minutes=M15_MINUTES)
     return (evaluation_time - close_time) > pd.Timedelta(minutes=30)
+
+
+def _is_future_candle(*, candle_time: pd.Timestamp, evaluation_time: pd.Timestamp) -> bool:
+    return _to_utc_timestamp(candle_time) > _to_utc_timestamp(evaluation_time)
 
 
 def _is_in_session(candle_time: pd.Timestamp) -> bool:
